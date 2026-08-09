@@ -30,6 +30,8 @@ DISK1="$BYSERIAL/USB30_DISK01-20170331000C3"
 
 LOG=/var/log/tank-boot-unlock.log
 WAIT_SECS=120
+IMPORT_TRIES=12
+IMPORT_DELAY=5
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
 
@@ -55,16 +57,35 @@ log "both disks visible after ${waited}s"
 if "$ZPOOL" list -H -o name "$POOL" >/dev/null 2>&1; then
 	log "pool already imported; skipping import"
 else
+	# RETRY, and do not treat the first failure as fatal. The 2026-08-09 reboot
+	# failed here: InvariantDisks published the symlinks at 15:12:44.875 and the
+	# import ran ~150ms later and reported "no such pool available". A symlink
+	# existing only means the BSD device node exists — it does NOT mean the drive
+	# has finished spinning up, or that DiskArbitration has finished probing the
+	# new media and released it. Either way the label read comes back empty and
+	# zpool concludes there is no pool, which is indistinguishable from a real
+	# absence at that instant but resolves itself seconds later.
+	#
 	# -N: attach only — do not mount. Steps 3 and 4 decrypt and mount explicitly.
 	# No -l here: this build errors with "-l is incompatible with -N", so the key
 	# gets loaded in step 3 instead. One command per step, which is clearer anyway.
-	"$ZPOOL" import -N -d "$BYSERIAL" "$POOL" >>"$LOG" 2>&1
-	rc=$?
+	attempt=0
+	rc=1
+	while [ "$attempt" -lt "$IMPORT_TRIES" ]; do
+		attempt=$((attempt + 1))
+		out=$("$ZPOOL" import -N -d "$BYSERIAL" "$POOL" 2>&1)
+		rc=$?
+		[ "$rc" -eq 0 ] && break
+		log "import attempt $attempt/$IMPORT_TRIES failed (rc=$rc): $out"
+		[ "$attempt" -lt "$IMPORT_TRIES" ] && sleep "$IMPORT_DELAY"
+	done
 	if [ "$rc" -ne 0 ]; then
-		log "FAIL: zpool import exited $rc"
+		log "FAIL: zpool import still failing after $attempt attempts"
+		log "      Disks are visible but carry no readable label. Check the"
+		log "      enclosure and run: zpool import -d $BYSERIAL"
 		exit 1
 	fi
-	log "import OK"
+	log "import OK on attempt $attempt"
 fi
 
 # 3. Decrypt. This is the step the stock daemons never do. Guarded on keystatus so
