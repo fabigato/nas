@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.tank-boot-unlock</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/tank-boot-unlock.sh</string>
+	</array>
+
+	<!-- Run once at boot. The script polls for the disks itself, so it does not
+	     need launchd to order it after InvariantDisks. -->
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Do not restart it. If it fails, it failed for a reason worth reading in
+	     the log, and a retry loop would just spin against a dead enclosure. -->
+	<key>KeepAlive</key>
+	<false/>
+
+	<key>StandardOutPath</key>
+	<string>/var/log/tank-boot-unlock.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/tank-boot-unlock.launchd.log</string>
+</dict>
+</plist>
