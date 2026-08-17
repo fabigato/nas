@@ -1,0 +1,307 @@
+=== watch started 2026-08-17 22:21:22 ===
+
+######## CHANGE at 22:21:22 ########
+--- zpool status -v ---
+  pool: tank
+ state: ONLINE
+config:
+
+	NAME                            STATE     READ WRITE CKSUM
+	tank                            ONLINE       0     0     0
+	  mirror-0                      ONLINE       0     0     0
+	    USB30_DISK00-20170331000C3  ONLINE       0     0     0
+	    USB30_DISK01-20170331000C3  ONLINE       0     0     0
+
+errors: No known data errors
+--- by-serial present ---
+USB30_DISK00-20170331000C3
+USB30_DISK00-20170331000C3:1
+USB30_DISK00-20170331000C3:9
+USB30_DISK01-20170331000C3
+USB30_DISK01-20170331000C3:1
+USB30_DISK01-20170331000C3:9
+--- SCSI LUNs present ---
+USB3.0 DISK00
+USB3.0 DISK01
+--- zpool events (last 12) ---
+cannot get event: permission denied
+TIME                           CLASS
+--- new zed log lines ---
+(no new zed output)
+
+######## CHANGE at 22:27:33 ########
+--- zpool status -v ---
+errors: List of errors unavailable: pool I/O is currently suspended
+  pool: tank
+ state: SUSPENDED
+status: One or more devices are faulted in response to IO failures.
+action: Make sure the affected devices are connected, then run 'zpool clear'.
+   see: https://openzfs.github.io/openzfs-docs/msg/ZFS-8000-HC
+config:
+
+	NAME                            STATE     READ WRITE CKSUM
+	tank                            ONLINE       0     0     0
+	  mirror-0                      ONLINE       0    12     0
+	    USB30_DISK00-20170331000C3  ONLINE       3    12     0
+	    USB30_DISK01-20170331000C3  ONLINE       0    12     0
+
+--- by-serial present ---
+(none)
+--- SCSI LUNs present ---
+USB3.0 DISK00
+USB3.0 DISK01
+--- zpool events (last 12) ---
+cannot get event: permission denied
+TIME                           CLASS
+--- new zed log lines ---
+Invoking "all-syslog.sh" eid=6 pid=71989
+Diagnosis Engine: discarding 'resource.fs.zfs.removed for vdev 18140822688500500883
+Retire Agent: zfs_retire_recv: 'resource.fs.zfs.removed'
+Invoking "all-syslog.sh" eid=7 pid=71990
+Retire Agent: matched vdev 18140822688500500883
+Invoking "all-syslog.sh" eid=8 pid=71991
+Invoking "data-notify.sh" eid=8 pid=71992
+Invoking "all-syslog.sh" eid=9 pid=71993
+Invoking "data-notify.sh" eid=9 pid=71994
+Invoking "all-syslog.sh" eid=10 pid=71995
+Invoking "data-notify.sh" eid=10 pid=71996
+Invoking "all-syslog.sh" eid=11 pid=71997
+Invoking "data-notify.sh" eid=11 pid=71998
+Invoking "all-syslog.sh" eid=12 pid=71999
+Finished "all-syslog.sh" eid=10 pid=71995 time=0.017994s exit=0
+Finished "all-syslog.sh" eid=6 pid=71989 time=0.018941s exit=0
+Finished "all-syslog.sh" eid=7 pid=71990 time=0.017780s exit=0
+Finished "all-syslog.sh" eid=11 pid=71997 time=0.017454s exit=0
+Finished "all-syslog.sh" eid=8 pid=71991 time=0.019893s exit=0
+Finished "all-syslog.sh" eid=9 pid=71993 time=0.018168s exit=0
+Finished "all-syslog.sh" eid=12 pid=71999 time=0.016119s exit=0
+Finished "data-notify.sh" eid=9 pid=71994 time=0.018644s exit=3
+Finished "data-notify.sh" eid=11 pid=71998 time=0.018128s exit=3
+Finished "data-notify.sh" eid=10 pid=71996 time=0.020138s exit=3
+Finished "data-notify.sh" eid=8 pid=71992 time=0.017786s exit=3
+
+######## CHANGE at 22:27:35 ########
+--- zpool status -v ---
+errors: List of errors unavailable: pool I/O is currently suspended
+  pool: tank
+ state: SUSPENDED
+status: One or more devices are faulted in response to IO failures.
+action: Make sure the affected devices are connected, then run 'zpool clear'.
+   see: https://openzfs.github.io/openzfs-docs/msg/ZFS-8000-HC
+config:
+
+	NAME                            STATE     READ WRITE CKSUM
+	tank                            ONLINE       0     0     0
+	  mirror-0                      ONLINE       0    12     0
+	    USB30_DISK00-20170331000C3  ONLINE       3    12     0
+	    USB30_DISK01-20170331000C3  ONLINE       0    12     0
+
+--- by-serial present ---
+(none)
+--- SCSI LUNs present ---
+USB3.0 DISK00
+USB3.0 DISK01
+--- zpool events (last 12) ---
+cannot get event: permission denied
+TIME                           CLASS
+--- new zed log lines ---
+(no new zed output)
+
+######## CHANGE at 22:27:38 ########
+--- zpool status -v ---
+errors: List of errors unavailable: pool I/O is currently suspended
+  pool: tank
+ state: SUSPENDED
+status: One or more devices are faulted in response to IO failures.
+action: Make sure the affected devices are connected, then run 'zpool clear'.
+   see: https://openzfs.github.io/openzfs-docs/msg/ZFS-8000-HC
+config:
+
+	NAME                            STATE     READ WRITE CKSUM
+	tank                            ONLINE       0     0     0
+	  mirror-0                      ONLINE       0    12     0
+	    USB30_DISK00-20170331000C3  ONLINE       3    12     0
+	    USB30_DISK01-20170331000C3  ONLINE       0    12     0
+
+--- by-serial present ---
+USB30_DISK01-20170331000C3
+USB30_DISK01-20170331000C3:1
+USB30_DISK01-20170331000C3:9
+--- SCSI LUNs present ---
+USB3.0 DISK00
+USB3.0 DISK01
+--- zpool events (last 12) ---
+cannot get event: permission denied
+TIME                           CLASS
+--- new zed log lines ---
+(no new zed output)
+
+######## CHANGE at 22:36:42 ########
+--- zpool status -v ---
+errors: List of errors unavailable: pool I/O is currently suspended
+  pool: tank
+ state: SUSPENDED
+status: One or more devices are faulted in response to IO failures.
+action: Make sure the affected devices are connected, then run 'zpool clear'.
+   see: https://openzfs.github.io/openzfs-docs/msg/ZFS-8000-HC
+config:
+
+	NAME                            STATE     READ WRITE CKSUM
+	tank                            ONLINE       0     0     0
+	  mirror-0                      ONLINE       2    12     0
+	    USB30_DISK00-20170331000C3  ONLINE       3    12     0
+	    USB30_DISK01-20170331000C3  ONLINE       4    12     0
+
+--- by-serial present ---
+USB30_DISK01-20170331000C3
+USB30_DISK01-20170331000C3:1
+USB30_DISK01-20170331000C3:9
+--- SCSI LUNs present ---
+USB3.0 DISK00
+USB3.0 DISK01
+--- zpool events (last 12) ---
+cannot get event: permission denied
+TIME                           CLASS
+--- new zed log lines ---
+Invoking "all-syslog.sh" eid=13 pid=76026
+Invoking "all-syslog.sh" eid=14 pid=76027
+Invoking "all-syslog.sh" eid=15 pid=76028
+Invoking "data-notify.sh" eid=15 pid=76029
+Invoking "all-syslog.sh" eid=16 pid=76031
+Invoking "data-notify.sh" eid=16 pid=76032
+Invoking "all-syslog.sh" eid=17 pid=76035
+Finished "data-notify.sh" eid=15 pid=76029 time=0.010294s exit=3
+Finished "all-syslog.sh" eid=13 pid=76026 time=0.020292s exit=0
+Finished "all-syslog.sh" eid=14 pid=76027 time=0.017048s exit=0
+Finished "data-notify.sh" eid=16 pid=76032 time=0.007708s exit=3
+Finished "all-syslog.sh" eid=15 pid=76028 time=0.014841s exit=0
+Finished "all-syslog.sh" eid=16 pid=76031 time=0.010732s exit=0
+Finished "all-syslog.sh" eid=17 pid=76035 time=0.008575s exit=0
+
+######## CHANGE at 22:38:31 ########
+--- zpool status -v ---
+errors: List of errors unavailable: pool I/O is currently suspended
+  pool: tank
+ state: SUSPENDED
+status: One or more devices are faulted in response to IO failures.
+action: Make sure the affected devices are connected, then run 'zpool clear'.
+   see: https://openzfs.github.io/openzfs-docs/msg/ZFS-8000-HC
+config:
+
+	NAME                            STATE     READ WRITE CKSUM
+	tank                            ONLINE       0     0     0
+	  mirror-0                      ONLINE       2    12     0
+	    USB30_DISK00-20170331000C3  ONLINE       3    12     0
+	    USB30_DISK01-20170331000C3  ONLINE       4    12     0
+
+--- by-serial present ---
+(none)
+--- SCSI LUNs present ---
+USB3.0 DISK00
+USB3.0 DISK01
+--- zpool events (last 12) ---
+cannot get event: permission denied
+TIME                           CLASS
+--- new zed log lines ---
+(no new zed output)
+
+######## CHANGE at 22:39:09 ########
+--- zpool status -v ---
+errors: List of errors unavailable: pool I/O is currently suspended
+  pool: tank
+ state: SUSPENDED
+status: One or more devices are faulted in response to IO failures.
+action: Make sure the affected devices are connected, then run 'zpool clear'.
+   see: https://openzfs.github.io/openzfs-docs/msg/ZFS-8000-HC
+config:
+
+	NAME                            STATE     READ WRITE CKSUM
+	tank                            ONLINE       0     0     0
+	  mirror-0                      ONLINE       2    12     0
+	    USB30_DISK00-20170331000C3  ONLINE       3    12     0
+	    USB30_DISK01-20170331000C3  ONLINE       4    12     0
+
+--- by-serial present ---
+USB30_DISK00-20170331000C3
+USB30_DISK00-20170331000C3:1
+USB30_DISK00-20170331000C3:9
+USB30_DISK01-20170331000C3
+USB30_DISK01-20170331000C3:1
+USB30_DISK01-20170331000C3:9
+--- SCSI LUNs present ---
+USB3.0 DISK00
+USB3.0 DISK01
+--- zpool events (last 12) ---
+cannot get event: permission denied
+TIME                           CLASS
+--- new zed log lines ---
+(no new zed output)
+
+######## CHANGE at 22:43:43 ########
+--- zpool status -v ---
+  pool: tank
+ state: ONLINE
+  scan: resilvered 360K in 00:00:00 with 0 errors on Mon Aug 17 22:43:43 2026
+config:
+
+	NAME                            STATE     READ WRITE CKSUM
+	tank                            ONLINE       0     0     0
+	  mirror-0                      ONLINE       0     0     0
+	    USB30_DISK00-20170331000C3  ONLINE       0     0     0
+	    USB30_DISK01-20170331000C3  ONLINE       0     0     0
+
+errors: No known data errors
+--- by-serial present ---
+USB30_DISK00-20170331000C3
+USB30_DISK00-20170331000C3:1
+USB30_DISK00-20170331000C3:9
+USB30_DISK01-20170331000C3
+USB30_DISK01-20170331000C3:1
+USB30_DISK01-20170331000C3:9
+--- SCSI LUNs present ---
+USB3.0 DISK00
+USB3.0 DISK01
+--- zpool events (last 12) ---
+cannot get event: permission denied
+TIME                           CLASS
+--- new zed log lines ---
+Invoking "vdev_clear-sync-led.sh" eid=18 pid=79424
+Finished "vdev_clear-sync-led.sh" eid=18 pid=79424 time=0.012330s exit=1
+Invoking "all-syslog.sh" eid=19 pid=79436
+Invoking "all-syslog.sh" eid=20 pid=79437
+Invoking "history_event-zfs-list-cacher.sh" eid=20 pid=79438
+Finished "all-syslog.sh" eid=20 pid=79437 time=0.009689s exit=0
+Finished "all-syslog.sh" eid=19 pid=79436 time=0.016043s exit=0
+Finished "history_event-zfs-list-cacher.sh" eid=20 pid=79438 time=0.007551s exit=0
+Retire Agent: zpool_vdev_remove_wanted 'USB30_DISK00-20170331000C3', err:0
+Retire Agent: no spare for 'USB30_DISK00-20170331000C3'
+Invoking "all-syslog.sh" eid=21 pid=79440
+Diagnosis Engine: discarding 'resource.fs.zfs.removed for vdev 2583744055028860945
+Retire Agent: zfs_retire_recv: 'resource.fs.zfs.removed'
+Retire Agent: matched vdev 2583744055028860945
+Finished "all-syslog.sh" eid=21 pid=79440 time=0.005632s exit=0
+Retire Agent: zpool_vdev_remove_wanted 'USB30_DISK01-20170331000C3', err:2008
+Diagnosis Engine: case opened (F15AB765-397C-4742-929B-4F02D8880AD0)
+Diagnosis Engine: opening case for vdev 0 due to 'ereport.fs.zfs.io_failure'
+Diagnosis Engine: error event 'ereport.fs.zfs.io_failure'
+Diagnosis Engine: solving fault 'fault.fs.zfs.io_failure_wait'
+
+zed_fault_event:
+	uuid: F15AB765-397C-4742-929B-4F02D8880AD0
+	class: fault.fs.zfs.io_failure_wait
+	code: ZFS-8000-HC
+	certainty: 100
+	scheme: zfs
+	pool: 16339913772407348915
+Diagnosis Engine: case solved (F15AB765-397C-4742-929B-4F02D8880AD0)
+Retire Agent: zfs_retire_recv: 'list.suspect'
+Invoking "all-syslog.sh" eid=22 pid=79442
+Invoking "history_event-zfs-list-cacher.sh" eid=22 pid=79443
+Invoking "all-syslog.sh" eid=23 pid=79444
+Invoking "resilver_finish-notify.sh" eid=23 pid=79445
+Invoking "resilver_finish-start-scrub.sh" eid=23 pid=79446
+Finished "history_event-zfs-list-cacher.sh" eid=22 pid=79443 time=0.010333s exit=0
+Finished "all-syslog.sh" eid=22 pid=79442 time=0.013310s exit=0
+Finished "all-syslog.sh" eid=23 pid=79444 time=0.015087s exit=0
+Finished "resilver_finish-start-scrub.sh" eid=23 pid=79446 time=0.014653s exit=2
+Finished "resilver_finish-notify.sh" eid=23 pid=79445 time=0.063945s exit=0
