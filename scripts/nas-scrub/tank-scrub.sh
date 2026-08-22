@@ -13,11 +13,18 @@
 # advance warning of a drive about to die.
 #
 # WHAT THIS SCRIPT IS AND ISN'T
-# It is a scheduler with guards and a durable log. It is NOT the notifier:
-# `zed` is already running with scrub_finish-notify.sh enabled, which is the
-# right place for "tell me when a scrub found something". As shipped it has no
-# delivery channel configured (ZED_EMAIL_ADDR=root with no MTA), so it notifies
-# nobody — see the NOTIFICATIONS note at the bottom of this header.
+# It is a scheduler with guards, a durable log, and alerting for its OWN
+# failures. It is not the scrub-result reporter: `zed` owns that via
+# scrub_finish-notify.sh, which builds a better report than anything worth
+# writing here.
+#
+# The split is about who can see what. zed only ever speaks when a scrub
+# FINISHES. It is structurally silent about the cases where the scrub never ran
+# at all — pool not imported, pool suspended, preflight refused, watch aborted
+# — and those are exactly the cases where silence is most misleading, because
+# "healthy" and "never ran" look identical from outside. So this script alerts
+# on its own refusals and aborts, and leaves the clean-scrub report to zed.
+# See the NOTIFICATIONS note at the bottom of this header.
 #
 # EXIT CODES — these are the summary, readable via
 #   launchctl print system/local.tank-scrub | grep 'last exit'
@@ -55,14 +62,30 @@
 # An in-flight scrub survives all of that, and survives reboots too — ZFS
 # persists scan state in the pool. To stop one: sudo zpool scrub -s tank
 #
-# NOTIFICATIONS — the open end of this. A scrub that finds corruption and
-# writes it only to a log file nobody reads has not monitored anything. zed's
-# scrub_finish-notify.sh already builds the exact report you'd want and stays
-# silent when the pool is healthy (ZED_NOTIFY_VERBOSE=0), so all that is
-# missing is one channel in /etc/zfs/zed.d/zed.rc. zed-functions.sh in this
-# build implements email, ntfy, Pushover, Gotify, Pushbullet and Slack. Email
-# needs an MTA on this machine and is the worst option. Until a channel is set,
-# treat `grep -E 'ERRORS|REFUSED' /var/log/tank-scrub.log` as the alerting.
+# NOTIFICATIONS — Discord, via zed's Slack backend. Configured 2026-08-23.
+#
+# Discord webhooks expose a Slack-compatible endpoint: append /slack to the
+# webhook URL and it accepts Slack's payload, which is what zed sends. So
+# ZED_SLACK_WEBHOOK_URL in /etc/zfs/zed.d/zed.rc drives both zed and the
+# notify() function below, one value, no Discord-specific code. Verified
+# end to end 2026-08-23: HTTP 200, body "ok".
+#
+# ZED_NOTIFY_VERBOSE IS DELIBERATELY 1, against the default. It means a CLEAN
+# scrub also posts, roughly twelve messages a year. The reason is not that a
+# clean result is interesting — it is that the webhook can die without telling
+# anyone (see notify() below for the measurement), so "no news is good news"
+# is not a safe reading. With verbose on, the monthly message is a heartbeat:
+# nothing arriving on the 1st is itself the signal. Turning this off means
+# trusting silence, and silence here is ambiguous.
+#
+# Residual hole, stated so it is not mistaken for covered: if this daemon is
+# unloaded, or the plist is removed, nothing notifies — neither zed nor this
+# script runs at all. Only something outside the machine can catch that. A
+# calendar reminder to glance at the log after the 1st is the cheap version.
+#
+# The webhook URL is a bearer credential: anyone holding it can post to the
+# server. zed.rc should be chmod 600, and the URL escrowed in pass next to
+# nas/tank-key. Regenerate it in Discord if it leaks.
 
 set -u
 
@@ -94,12 +117,85 @@ MAX_WAIT_SECS=172800
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
 
-# Loud channel for things a human must see. Goes to the unified log so it is
-# greppable next to the kernel's own ZFS messages, which is where you will be
-# looking anyway if the pool is misbehaving.
+# Overridable for the same reason as POLL_SECS: so the delivery path can be
+# tested against a throwaway config without editing the live one.
+ZEDRC=${TANK_SCRUB_ZEDRC:-/etc/zfs/zed.d/zed.rc}
+NOTIFY_MAX_CHARS=1500
+
+# Push a message to whatever channel zed is configured for, reusing zed's own
+# webhook URL so delivery is configured in exactly one place.
+#
+# WHY THIS DOES NOT CALL zed_notify(), which is sourceable and would be less
+# code: zed's Slack backend cannot detect its own failure against Discord.
+# Measured 2026-08-23 — POST to a webhook with a bad token returns
+#   HTTP 401  {"message": "Invalid Webhook Token", "code": 50027}
+# curl exits 0 because zed does not pass -f, and zed's error check greps for
+# Slack's {"error": ... "message": ...} shape, which does not match Discord's
+# flat {"message": ...}. So zed logs a rejected post as delivered. For the one
+# channel that reports the daemon's own failures, that is exactly backwards, so
+# this checks the HTTP status itself and says so in the log when delivery fails.
+#
+# The URL is READ, not sourced — no executing a config file from inside the
+# daemon, and no chance of zed.rc clobbering a variable in here. It must end in
+# /slack: that is Discord's Slack-compatible endpoint, and zed needs the same
+# suffix, so one value serves both.
+#
+# $1 = subject, $2 = body.
+notify() {
+	nurl=$(awk -F'"' '/^ZED_SLACK_WEBHOOK_URL=/ { print $2; exit }' "$ZEDRC" 2>/dev/null)
+	if [ -z "$nurl" ]; then
+		log "  notify: no channel set (ZED_SLACK_WEBHOOK_URL in $ZEDRC) — log only"
+		return 0
+	fi
+
+	# Same escaping zed uses, so the payload shape stays identical to what the
+	# zedlets send. Truncated because Discord rejects a message body over 2000
+	# characters with a 400 — and the bodies most likely to overflow are
+	# `zpool status -v` with a long list of corrupted files, i.e. precisely when
+	# the message matters most. Better clipped than dropped; the log has it all.
+	# `head -c` counts bytes, so it can cut a multi-byte character in half and
+	# emit invalid UTF-8 inside the JSON. Tested 2026-08-23: Discord actually
+	# accepts that and returns 200, but only because it is lenient — iconv -c
+	# drops the incomplete sequence so we are not relying on that. Its stderr is
+	# discarded: it warns about the very truncation we asked for.
+	nbody=$(printf '%s' "$2" | head -c "$NOTIFY_MAX_CHARS" |
+		iconv -c -f UTF-8 -t UTF-8 2>/dev/null | awk '
+		{ ORS = "\\n" }
+		{ gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/\t/, "\\t");
+		  gsub(/\f/, "\\f"); gsub(/\r/, "\\r"); print }')
+	npayload=$(printf '{"text": "*%s*\\n```%s```"}' "$1" "$nbody")
+
+	nstatus=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' \
+		-X POST "$nurl" \
+		--header 'Content-Type: application/json' \
+		--data-binary "$npayload" 2>/dev/null)
+	nrc=$?
+
+	case "$nstatus" in
+	2*) log "  notify: delivered (HTTP $nstatus)" ;;
+	*)
+		log "  notify: DELIVERY FAILED (curl rc=$nrc, HTTP ${nstatus:-none})."
+		log "          The message above exists ONLY in this log. Check the webhook"
+		log "          URL in $ZEDRC, and that this machine has network at 03:00."
+		;;
+	esac
+}
+
+# Loud channel for things a human must see: the log, the unified log (greppable
+# next to the kernel's own ZFS messages), and the notification channel.
+#
+# $1 = one-line summary. $2 = optional detail, added to the notification body;
+# the log gets detail separately and in full.
 alert() {
-	log "$*"
-	/usr/bin/logger -t tank-scrub -p daemon.err "$*"
+	log "$1"
+	/usr/bin/logger -t tank-scrub -p daemon.err "$1"
+	if [ "${2:-}" != "" ]; then
+		notify "tank-scrub: $POOL on $(hostname -s)" "$1
+
+$2"
+	else
+		notify "tank-scrub: $POOL on $(hostname -s)" "$1"
+	fi
 }
 
 # The whole `scan:` block from zpool status, flattened to one line with " | "
@@ -342,7 +438,7 @@ case "$xout" in
 esac
 
 if [ -n "$problem" ]; then
-	alert "ERRORS: $problem"
+	alert "ERRORS: $problem" "$("$ZPOOL" status -v "$POOL" 2>&1)"
 	log "full status follows:"
 	"$ZPOOL" status -v "$POOL" >>"$LOG" 2>&1
 	log "      What to do, in order:"
