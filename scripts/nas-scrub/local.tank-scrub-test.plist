@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- TEST HARNESS ONLY — never leave this bootstrapped.
+	     Same program and same log as local.tank-scrub, but with a 5-second poll
+	     so a scrub of a near-empty pool can be watched start to finish in
+	     seconds instead of spending 10 minutes asleep at the first poll.
+
+	     WHY A WHOLE SECOND PLIST, rather than an env var at test time:
+	     `sudo launchctl setenv TANK_SCRUB_POLL_SECS 5` fails with
+	       150: Operation not permitted while System Integrity Protection is engaged
+	     because it mutates launchd's global environment, which SIP forbids.
+	     EnvironmentVariables in a plist is per-job and is allowed. Measured
+	     2026-08-22, so do not reach for setenv again.
+
+	     This is a FAITHFUL test of the production job, not an approximation.
+	     TCC attributes device access to the binary being executed — /usr/local/zfs/bin/zpool
+	     — not to the launchd label, so the Full Disk Access context here is
+	     identical to local.tank-scrub. Same uid, same empty environment, same
+	     missing GUI session, same minimal PATH. That is the whole point: a
+	     terminal run proves nothing because sudo inherits the terminal app's
+	     FDA grant, which is exactly how the boot-unlock bug hid for three cold
+	     boots.
+
+	     Usage:
+	       sudo launchctl bootstrap system /Library/LaunchDaemons/local.tank-scrub-test.plist
+	       sudo launchctl kickstart -k system/local.tank-scrub-test
+	       ... watch /var/log/tank-scrub.log ...
+	       sudo launchctl bootout system/local.tank-scrub-test
+	       sudo rm /Library/LaunchDaemons/local.tank-scrub-test.plist
+	     The last two lines are not optional. Leaving this loaded means an
+	     unscheduled job that will fire on the next `bootstrap` of the system
+	     domain. -->
+
+	<key>Label</key>
+	<string>local.tank-scrub-test</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/tank-scrub.sh</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>TANK_SCRUB_POLL_SECS</key>
+		<string>5</string>
+		<!-- 1 rather than 3600, so the hourly-progress branch actually executes
+		     at least once and gets exercised. On the production job this path
+		     only runs after the first hour of a real multi-hour scrub, which is
+		     precisely the code you least want to discover is broken. -->
+		<key>TANK_SCRUB_PROGRESS_EVERY</key>
+		<string>1</string>
+	</dict>
+
+	<!-- No StartCalendarInterval on purpose: this job must only ever run when
+	     kickstarted by hand. -->
+	<key>RunAtLoad</key>
+	<false/>
+	<key>KeepAlive</key>
+	<false/>
+
+	<key>StandardOutPath</key>
+	<string>/var/log/tank-scrub.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/tank-scrub.launchd.log</string>
+</dict>
+</plist>

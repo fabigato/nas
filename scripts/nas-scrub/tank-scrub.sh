@@ -27,9 +27,14 @@
 #   3  nothing to do (a scrub or resilver was already running)
 #   4  gave up waiting for the scrub to finish; it is still running
 #
-# TESTING — kickstart, never a terminal, and never a reboot:
-#   sudo launchctl kickstart -k system/local.tank-scrub
+# TESTING — kickstart, never a terminal, and never a reboot. Use the test plist
+# next to this script, which is the same program with a 5-second poll:
+#   sudo launchctl bootstrap system /Library/LaunchDaemons/local.tank-scrub-test.plist
+#   sudo launchctl kickstart -k system/local.tank-scrub-test
 #   tail -f /var/log/tank-scrub.log
+#   sudo launchctl bootout system/local.tank-scrub-test   # do not skip this
+# Kickstarting local.tank-scrub itself works too and is just as valid a test —
+# it only means waiting out one 600s poll before it notices the scrub finished.
 # A terminal run proves less than it looks like it does: sudo inherits the
 # terminal app's Full Disk Access grant, which is exactly how the boot-unlock
 # bug hid for three cold boots. This daemon should not need FDA at all — both
@@ -72,9 +77,12 @@ STATE=/var/log/tank-scrub.last
 # is enough to see it moving and to spot a stall.
 #
 # Overridable only so the kickstart test does not spend 10 minutes asleep while
-# an empty pool's scrub finishes in under a second:
-#   sudo launchctl setenv TANK_SCRUB_POLL_SECS 5   # then kickstart, then unsetenv
-# Nothing in production sets these.
+# an empty pool's scrub finishes in under a second. Set them via
+# EnvironmentVariables in local.tank-scrub-test.plist, NOT via
+#   sudo launchctl setenv TANK_SCRUB_POLL_SECS 5
+# which fails with "150: Operation not permitted while System Integrity
+# Protection is engaged" — it mutates launchd's global environment and SIP
+# forbids that. Measured 2026-08-22. Nothing in production sets these.
 POLL_SECS=${TANK_SCRUB_POLL_SECS:-600}
 PROGRESS_EVERY=${TANK_SCRUB_PROGRESS_EVERY:-3600}
 
