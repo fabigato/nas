@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.tank-scrub</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/tank-scrub.sh</string>
+	</array>
+
+	<!-- Monthly, 1st at 03:00. Monthly is the usual choice for spinning rust and
+	     is what this pool wants: a full 7 TiB scan over this USB bridge is
+	     10-20 hours, so weekly would leave the drives scanning a meaningful
+	     fraction of their life. 03:00 to stay out of the way of Jellyfin.
+
+	     Missing an omitted key means "any", so leaving Month out is what makes
+	     this monthly rather than annual.
+
+	     If the machine is asleep or off at 03:00 on the 1st, launchd runs the
+	     job once at the next wake instead of skipping the month. That is the
+	     behaviour we want, and it is also why the script must be safe to start
+	     at an arbitrary moment rather than assuming it is 3am. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Day</key>
+		<integer>1</integer>
+		<key>Hour</key>
+		<integer>3</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+
+	<!-- Explicitly false. With RunAtLoad true this would scrub on every boot and
+	     on every reinstall of the plist, which is both pointless and a good way
+	     to keep the drives busy for a day after an unrelated reboot. -->
+	<key>RunAtLoad</key>
+	<false/>
+
+	<!-- The script can legitimately run for hours while it watches the scan, and
+	     restarting it would only start a second watcher against the same
+	     kernel-side scrub. It also exits nonzero on purpose (2 = errors found),
+	     and KeepAlive would read that as something to retry. -->
+	<key>KeepAlive</key>
+	<false/>
+
+	<!-- The script sleeps between polls; the scan itself runs in the kernel, so
+	     neither Nice nor LowPriorityIO here would affect its I/O. Scrub
+	     throttling is a ZFS concern (zfs_scrub_delay, zfs_vdev_scrub_max_active)
+	     and the defaults already yield to user I/O. Deliberately not set. -->
+
+	<key>StandardOutPath</key>
+	<string>/var/log/tank-scrub.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/tank-scrub.launchd.log</string>
+</dict>
+</plist>
