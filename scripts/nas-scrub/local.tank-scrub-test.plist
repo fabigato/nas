@@ -45,10 +45,17 @@
 	<dict>
 		<key>TANK_SCRUB_POLL_SECS</key>
 		<string>5</string>
-		<!-- 1 rather than 3600, so the hourly-progress branch actually executes
-		     at least once and gets exercised. On the production job this path
-		     only runs after the first hour of a real multi-hour scrub, which is
-		     precisely the code you least want to discover is broken. -->
+		<!-- 1 rather than 3600, intending to exercise the hourly-progress branch.
+		     BE CLEAR THAT THIS DOES NOT WORK ON A NEAR-EMPTY POOL: measured
+		     2026-08-22, a scrub of ~10 MB completes in 2 seconds, so by the
+		     first 5-second poll the scan already reads "completed", the loop
+		     breaks, and the progress branch is never reached. The test run
+		     exited 0 and logged no progress line at all.
+		     That branch is covered by tests/scan-parse instead, at the parser
+		     level. A real progress line needs a scrub long enough to still be
+		     running at the first poll — roughly 1 GB of data at the ~96 MB/s
+		     this enclosure scrubs at. Worth redoing for real once the pool has
+		     content in it. -->
 		<key>TANK_SCRUB_PROGRESS_EVERY</key>
 		<string>1</string>
 	</dict>

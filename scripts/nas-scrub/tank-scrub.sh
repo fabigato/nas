@@ -102,10 +102,31 @@ alert() {
 	/usr/bin/logger -t tank-scrub -p daemon.err "$*"
 }
 
-# The one-line `scan:` summary from zpool status. This is the whole progress and
-# result story; there is no zpool property that exposes it, so it gets parsed.
-scan_line() {
-	"$ZPOOL" status "$POOL" 2>/dev/null | awk '/^  scan:/{sub(/^  scan: /,""); print; exit}'
+# The whole `scan:` block from zpool status, flattened to one line with " | "
+# between parts. This is the entire progress and result story — there is no
+# zpool property that exposes scan state, so it gets parsed.
+#
+# It MUST be the whole block, not just the `scan:` line. A completed scrub is
+# one line, but a running one spans three, and only the continuation lines carry
+# the numbers:
+#   scan: scrub in progress since Sat Aug 22 23:41:16 2026
+#         1.20T / 7.10T scanned at 500M/s, 800G / 7.10T issued at 300M/s
+#         0B repaired, 11.27% done, 05:12:33 to go
+# An earlier version took the first line only and stopped there, which meant the
+# hourly progress line logged the same static "in progress since ..." string
+# every hour for the entire scrub — useless for the one thing it exists to do,
+# which is show movement and expose a stall. Found 2026-08-22.
+#
+# Continuation lines are indented 8 spaces; every sibling section (`config:`,
+# `errors:`) starts at column 1 and every other `  xxx:` field is indented 2, so
+# "8 spaces" is an exact terminator rather than a guess.
+scan_summary() {
+	"$ZPOOL" status "$POOL" 2>/dev/null | awk '
+		/^  scan:/  { out = $0; sub(/^  scan: /, "", out); found = 1; next }
+		found && /^        / { part = $0; sub(/^ +/, "", part); out = out " | " part; next }
+		found       { exit }
+		END         { if (found) print out }
+	'
 }
 
 # Error counters for the pool as a whole. Read from the pool's own row rather
@@ -167,7 +188,7 @@ DEGRADED)
 	;;
 esac
 
-before=$(scan_line)
+before=$(scan_summary)
 log "last scan: ${before:-<none recorded>}"
 
 case "$before" in
@@ -198,6 +219,11 @@ fi
 # 2. Start the scrub. Returns immediately; the scan runs in the kernel.
 # ---------------------------------------------------------------------------
 
+# Expect this to block for ~20s before returning, even though the scan itself is
+# asynchronous: measured 22s on 2026-08-22 (23:40:54 -> 23:41:16) on an idle
+# pool. Same signature as the ~22s a warm `zpool import` sometimes takes — the
+# drives are spun down or in standby and the command waits on them. Not a hang,
+# and not something to add a timeout around.
 started=$(date +%s)
 out=$("$ZPOOL" scrub "$POOL" 2>&1)
 rc=$?
@@ -225,7 +251,7 @@ last_progress=0
 while :; do
 	sleep "$POLL_SECS"
 	elapsed=$(($(date +%s) - started))
-	line=$(scan_line)
+	line=$(scan_summary)
 
 	case "$line" in
 	*"in progress"*) ;;
@@ -262,7 +288,7 @@ while :; do
 done
 
 elapsed=$(($(date +%s) - started))
-after=$(scan_line)
+after=$(scan_summary)
 read_after=$(counters)
 
 log "scan: $after"

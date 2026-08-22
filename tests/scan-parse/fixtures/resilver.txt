@@ -1,0 +1,11 @@
+  pool: tank
+ state: DEGRADED
+  scan: resilver in progress since Sat Aug 22 23:45:00 2026
+        400G / 7.10T scanned at 200M/s, 380G / 7.10T issued at 190M/s
+        0B resilvered, 5.35% done, 09:48:12 to go
+config:
+
+	NAME                            STATE     READ WRITE CKSUM
+	tank                            DEGRADED     0     0     0
+
+errors: No known data errors

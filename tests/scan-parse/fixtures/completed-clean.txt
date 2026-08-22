@@ -1,0 +1,12 @@
+  pool: tank
+ state: ONLINE
+  scan: scrub repaired 0B in 00:00:02 with 0 errors on Sat Aug 22 23:41:18 2026
+config:
+
+	NAME                            STATE     READ WRITE CKSUM
+	tank                            ONLINE       0     0     0
+	  mirror-0                      ONLINE       0     0     0
+	    USB30_DISK00-20170331000C3  ONLINE       0     0     0
+	    USB30_DISK01-20170331000C3  ONLINE       0     0     0
+
+errors: No known data errors
