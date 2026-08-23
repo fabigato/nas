@@ -162,6 +162,37 @@ if [ "$(id -u)" -ne 0 ]; then
 	exit 1
 fi
 
+# Honour --export on EVERY exit path that got far enough to import the pool.
+#
+# WHY THIS IS A FUNCTION AND NOT A BLOCK AT THE BOTTOM: it used to be a block at
+# the bottom, and five exit paths — including the ordinary nothing-to-send one —
+# returned before reaching it. So `--export` would import the drive, do its work,
+# and leave it imported, after the operator had explicitly asked for it to be
+# ready to unplug. That is the single state you must not unplug from: ZFS holds
+# the pool while the device disappears, which is the drive-pull test's failure
+# reproduced deliberately and for no reason.
+#
+# Exporting is safe on failure paths too. ZFS is transactional and a resume token
+# is durable, so a partial receive survives an export and can be resumed at the
+# next attach. Leaving it imported would only be more convenient for an immediate
+# retry, and that is not worth the risk of an unplug.
+maybe_export() {
+	if [ "$DO_EXPORT" != 1 ]; then
+		log "$DST_POOL left imported. Export before unplugging:"
+		log "  sudo $ZPOOL export $DST_POOL"
+		return 0
+	fi
+	log "exporting $DST_POOL — safe to unplug once this returns"
+	if run "$ZPOOL" export "$DST_POOL"; then
+		log "exported"
+		return 0
+	fi
+	log "WARNING: export failed. DO NOT UNPLUG. Something is holding the pool:"
+	log "         check for open files under the mountpoint, then retry:"
+	log "         sudo $ZPOOL export $DST_POOL"
+	return 1
+}
+
 if [ "$DRY_RUN" = 1 ]; then
 	log "=== start (pid $$) DRY RUN — deciding only, changing nothing ==="
 else
@@ -210,6 +241,7 @@ if [ "$dst_health" != "ONLINE" ]; then
 	# Stricter than the source deliberately. A DEGRADED source is still worth
 	# backing up; a DEGRADED destination is not worth writing a backup onto.
 	log "REFUSED: $DST_POOL health is '${dst_health:-<unreadable>}', not ONLINE."
+	maybe_export
 	exit 1
 fi
 log "$DST_POOL health: ONLINE"
@@ -221,6 +253,7 @@ if [ "$keystatus" != "available" ]; then
 	log "$DST_POOL key not loaded — prompting"
 	if ! run "$ZFS" load-key "$DST_POOL"; then
 		log "REFUSED: could not load the key for $DST_POOL."
+		maybe_export
 		exit 1
 	fi
 fi
@@ -347,6 +380,7 @@ for name in $DATASETS; do
 		log "  resume completed"
 	else
 		log "FAIL: resume of $dst failed. To abandon it instead: zfs recv -A $dst"
+		maybe_export
 		exit 2
 	fi
 done
@@ -394,8 +428,9 @@ if [ "$changed" -eq 0 ]; then
 	# find nothing to send and exit here, never reaching the check below.
 	enforce_readonly
 	ro_bad=$?
+	maybe_export || ro_bad=$((ro_bad + 1))
 	if [ "$ro_bad" -gt 0 ]; then
-		log "=== done (exit 2) — $ro_bad dataset(s) not read-only ==="
+		log "=== done (exit 2) ==="
 		exit 2
 	fi
 	log "=== done (exit 3) ==="
@@ -405,6 +440,7 @@ fi
 log "snapshotting $SRC_POOL@$NEW recursively"
 if ! run "$ZFS" snapshot -r "$SRC_POOL@$NEW"; then
 	log "FAIL: could not create $SRC_POOL@$NEW"
+	maybe_export
 	exit 2
 fi
 
@@ -494,24 +530,15 @@ log "sent $sent, failed $failed"
 "$ZFS" list -o name,used,avail,readonly -r "$DST_POOL" 2>&1 | tee -a "$LOG"
 
 if [ "$failed" -gt 0 ]; then
+	maybe_export
 	log "=== done (exit 2) — READ THE FAILURES ABOVE ==="
 	exit 2
 fi
 
-if [ "$DO_EXPORT" = 1 ]; then
-	# Export before unplugging. Yanking an imported pool is the bridge-fault
-	# scenario from the drive-pull test, on purpose and for no reason.
-	log "exporting $DST_POOL — safe to unplug once this returns"
-	if ! run "$ZPOOL" export "$DST_POOL"; then
-		log "WARNING: export failed. DO NOT UNPLUG. Something is holding the pool:"
-		log "         check for open files under the mountpoint, then retry."
-		exit 2
-	fi
-	log "exported"
-else
-	log "$DST_POOL left imported. Export before unplugging:"
-	log "  sudo $ZPOOL export $DST_POOL"
-fi
+maybe_export || {
+	log "=== done (exit 2) — synced, but the export failed ==="
+	exit 2
+}
 
 log "=== done (exit 0) ==="
 exit 0
