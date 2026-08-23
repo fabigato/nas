@@ -19,6 +19,7 @@ Everything here assumes the OpenZFS-on-macOS fork with binaries in
 | `scripts/nas-boot-unlock/` | Imports and unlocks `tank` at boot |
 | `scripts/nas-scrub/` | Monthly scrub, with guards and Discord alerting |
 | `scripts/nas-snapshot/` | Daily snapshots with tiered retention |
+| `scripts/nas-backup/` | Replication to an offline, independently-encrypted pool |
 | `tests/` | Test harnesses — see [Tests](#tests) |
 
 Each script carries a long header comment explaining its own design decisions.
@@ -26,7 +27,7 @@ This README is the map; the headers are the detail.
 
 ## The pool
 
-Four datasets, all inheriting `compression=lz4`, `atime=off`, `xattr=sa` and
+Three datasets, all inheriting `compression=lz4`, `atime=off`, `xattr=sa` and
 `dnodesize=auto` from the pool root. The root itself is `canmount=off` — it
 exists to hold properties the children inherit, and holds no data.
 
@@ -35,12 +36,16 @@ exists to hold properties the children inherit, and holds no data.
 | `tank/my_media` | 1M | Irreplaceable photos and video | 8 weekly + 6 monthly |
 | `tank/media` | 1M | Re-downloadable media | 2 weekly |
 | `tank/documents` | 128K | Small mixed files | 7 daily + 4 weekly + 6 monthly |
-| `tank/backups` | 1M | Large, cold | 2 weekly |
 
-The split between `my_media` and `media` is about **retention policy, not
-properties** — the two carry identical recordsize and compression. One is
-irreplaceable and gets deep retention plus offsite priority; the other can be
-re-downloaded and gets two snapshots of insurance against a mistyped `rm`.
+**The layout is organised by replaceability, and that is the whole design.** It
+is what decides retention depth, and it is also what decides offsite priority.
+
+The split between `my_media` and `media` is therefore about **policy, not
+properties** — the two carry identical recordsize and compression, so on
+properties alone splitting them buys nothing. One is irreplaceable and gets deep
+retention; the other can be re-downloaded and gets two snapshots of insurance
+against a mistyped `rm`. A dataset that can't be placed on that axis probably
+shouldn't exist, because there's no principled retention number to give it.
 
 ## The daemons
 
@@ -131,6 +136,59 @@ operation failed, `3` a configured dataset does not exist.
 Retention is configured at the bottom of the script as one line per dataset —
 keep counts per tier, `0` to disable a tier.
 
+## The offline backup — `tank-backup.sh`
+
+**Not a daemon, and there is no plist.** The destination drive is meant to be
+disconnected, which is the whole point: a backup that is always attached is an
+online second copy, reachable by the same `rm -rf`, the same ransomware and the
+same power event as the original. So this runs by hand, attended, when the drive
+is plugged in — which is also what lets the destination pool use
+`keylocation=prompt` and keep no key on disk at all.
+
+```sh
+sudo sh scripts/nas-backup/tank-backup.sh --dry-run   # decide, change nothing
+sudo sh scripts/nas-backup/tank-backup.sh --export    # sync, then export
+```
+
+Exit codes: `0` synced, `1` refused, `2` a send/receive failed, `3` nothing to do.
+
+**Non-raw `zfs send`, into a pool with its own encryption key.** Raw send (`-w`)
+of encrypted datasets is the historically buggiest corner of native ZFS
+encryption; non-raw sidesteps that path, and since both ends are the same machine
+on the same build there is no version skew to worry about. The destination
+re-encrypts under its own key, so the two pools share no key material —
+`encryptionroot` on a received dataset reads as the destination pool, not the
+source.
+
+The consequence that decides whether the backup is worth anything: **the
+destination passphrase must be recoverable without the source machine.** The
+scenario an offsite drive exists for is that machine being destroyed or stolen.
+
+**It takes its own `sync-` prefixed snapshots** rather than reusing the retention
+tiers, because there is no single pool-wide name to use as a base — the snapshot
+daemon's names are per-dataset and per-tier. The prefix also means the retention
+pruner, which anchors on `auto-`, is structurally incapable of destroying an
+incremental base. The script additionally places a `zfs hold`, as a second line
+of defence rather than the primary one.
+
+**Per-dataset sends, not `send -R` from the pool root**, so the destination's own
+root dataset — which is its encryption root — is never a receive target. The cost
+is no cross-dataset atomicity, which is not worth buying for independent datasets
+with no transactional relationship.
+
+**`recv -s`** leaves a resume token if a transfer is interrupted, rather than
+discarding the work. Immaterial on megabytes, decisive on terabytes over USB. To
+abandon a partial receive instead: `zfs recv -A <dataset>`.
+
+The destination gets `readonly=on` after each receive, and `failmode=continue`
+rather than `tank`'s `wait` — for the backup pool a yanked drive should fail the
+receive and be retried, not hang in an ioctl that `SIGKILL` cannot free.
+
+**Known limit:** `recv -F` makes the destination mirror the source's snapshot
+history rather than exceed it. Delete a file, let retention prune the snapshot
+holding it, then sync, and both copies are gone. Deep retention on the
+irreplaceable dataset is what keeps that window wide.
+
 ## Install
 
 The repo is the source of truth but installs are manual, so **`diff` before
@@ -216,6 +274,7 @@ that will fire on the next `bootstrap` of the system domain.
 | --- | --- |
 | `tests/snapshot-retention/` | Drives the snapshot pruner past its keep counts and asserts tier depths, that the survivors are the newest, prefix scoping, hold safety, and skip-if-unchanged. Run as root; creates `test-`prefixed snapshots on the live pool and cleans up on exit, including on `SIGINT` |
 | `tests/scan-parse/` | Fixture tests for the scrub daemon's `zpool status` parser, over completed / in-progress / repaired / errored / canceled / resilvering / never-scanned output |
+| `tests/backup-restore/` | Proves the offline backup is *restorable*, not just that the send exited 0: known payload and sha256 manifest, then cold import, passphrase, read-only mount, checksum verification and write-rejection probes. Partly manual — the physical unplug in the middle is the point and cannot be scripted |
 | `tests/2026-08-17-drive-pull/` | Procedure, observation harness and captured logs from physically pulling a drive from the running mirror |
 
 Two things to know before editing `tests/snapshot-retention/`:
