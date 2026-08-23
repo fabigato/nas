@@ -188,6 +188,28 @@ verify)
 		fi
 	done
 
+	# UNMOUNT WHAT WE MOUNTED. This is not tidiness — leaving the destination
+	# mounted broke the next sync on 2026-08-23. `zfs set readonly=on` needs a
+	# remount and could not get one (macOS had begun Spotlight-indexing three
+	# volumes that had just appeared), so the sync silently ended with the backup
+	# writable. It also made `zpool export` take 100 seconds instead of moments.
+	#
+	# Normal operation never has these mounted: recv -u leaves them alone. This
+	# phase is the only thing that mounts them, so this phase owns undoing it.
+	echo
+	echo "--- unmounting ---"
+	for name in $DATASETS; do
+		dst="$DST_POOL/$name"
+		if [ "$("$ZFS" get -H -o value mounted "$dst" 2>/dev/null)" = "yes" ]; then
+			if "$ZFS" unmount "$dst" 2>/dev/null; then
+				ok "$dst unmounted"
+			else
+				bad "$dst could not be unmounted — the next sync may fail to set"
+				bad "  readonly=on. Find the holder before syncing again."
+			fi
+		fi
+	done
+
 	echo
 	echo "=========================================="
 	echo "passed $pass, failed $fail"

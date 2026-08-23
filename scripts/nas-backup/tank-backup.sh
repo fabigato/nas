@@ -275,6 +275,56 @@ prune_sync() {
 	done
 }
 
+# Make every destination dataset readonly=on, and PROVE it rather than assume.
+# Returns the number that could not be set.
+#
+# WHY THIS IS VERIFIED AND NOT A FIRE-AND-FORGET `zfs set`:
+# Measured 2026-08-23. The first two syncs ended readonly=on; the third ended
+# readonly=OFF on all three datasets, with the send succeeding and the script
+# exiting 0. The difference was that the restore test had mounted the datasets
+# and left them mounted, and `zfs set readonly` needs a remount it could not
+# get — plausibly because macOS had started Spotlight-indexing three volumes
+# that had just appeared. The same contention made `zpool export` take 100s.
+#
+# The mechanism is inference; the defect was not. The old code discarded the
+# exit status of the one property that stops anything other than this script
+# writing to the backup. A backup that quietly stops being read-only is the
+# worst class of failure here, because it still reads as covered.
+#
+# So: unmount first — nothing should be mounted here in normal operation, since
+# recv -u leaves them alone — then set, then read the property back.
+enforce_readonly() {
+	_bad=0
+	for _name in $DATASETS; do
+		_d="$DST_POOL/$_name"
+		"$ZFS" list -H -o name "$_d" >/dev/null 2>&1 || continue
+
+		if [ "$("$ZFS" get -H -o value mounted "$_d" 2>/dev/null)" = "yes" ]; then
+			log "  $_d was mounted — unmounting before setting readonly"
+			run "$ZFS" unmount "$_d" 2>/dev/null ||
+				log "  could not unmount $_d; the readonly set may fail"
+		fi
+
+		[ "$("$ZFS" get -H -o value readonly "$_d" 2>/dev/null)" = "on" ] && continue
+
+		run "$ZFS" set readonly=on "$_d" 2>/dev/null
+		[ "$DRY_RUN" = 1 ] && continue
+
+		_ro=$("$ZFS" get -H -o value readonly "$_d" 2>/dev/null)
+		if [ "$_ro" != "on" ]; then
+			log "FAIL: $_d is readonly='$_ro' and could not be set to on."
+			log "      THE BACKUP IS WRITABLE BY ANYTHING. Something holds the mount:"
+			log "      zfs get mounted,readonly $_d"
+			log "      Check for a stray mount from tests/backup-restore/, and for"
+			log "      Spotlight indexing the volume."
+			_bad=$((_bad + 1))
+		else
+			log "  $_d readonly=on"
+		fi
+	done
+	return "$_bad"
+}
+
 # ---------------------------------------------------------------------------
 # 0. Finish any interrupted receive before starting new work. A destination
 #    holding a resume token will reject a fresh send, and resuming is both
@@ -339,6 +389,15 @@ done
 
 if [ "$changed" -eq 0 ]; then
 	log "nothing written on any dataset since the last sync — nothing to do"
+	# Still enforce readonly before leaving. Otherwise a destination that drifted
+	# writable would stay that way indefinitely: every subsequent run would also
+	# find nothing to send and exit here, never reaching the check below.
+	enforce_readonly
+	ro_bad=$?
+	if [ "$ro_bad" -gt 0 ]; then
+		log "=== done (exit 2) — $ro_bad dataset(s) not read-only ==="
+		exit 2
+	fi
 	log "=== done (exit 3) ==="
 	exit 3
 fi
@@ -402,11 +461,17 @@ for name in $DATASETS; do
 	# invisible to tank-snapshot.sh's pruner, so this is defence against a human
 	# with a shell rather than against the daemon.
 	run "$ZFS" hold "$HOLD_TAG" "$src@$NEW" 2>/dev/null
-
-	# Nothing but this script should ever write to the destination. Set after the
-	# receive, because a received dataset takes its properties from the stream.
-	run "$ZFS" set readonly=on "$dst"
 done
+
+# Nothing but this script should ever write to the destination. Done here, once,
+# rather than inside the loop, so the check covers every dataset even if one
+# send was skipped — and so a failure is counted rather than swallowed.
+#
+# Captured into a variable rather than tested with `if !`, because `$?` inside
+# the branch of an `if !` is not reliably the function's own status.
+enforce_readonly
+ro_bad=$?
+failed=$((failed + ro_bad))
 
 # ---------------------------------------------------------------------------
 # 3. Prune both sides, then report.

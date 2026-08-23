@@ -180,9 +180,17 @@ with no transactional relationship.
 discarding the work. Immaterial on megabytes, decisive on terabytes over USB. To
 abandon a partial receive instead: `zfs recv -A <dataset>`.
 
-The destination gets `readonly=on` after each receive, and `failmode=continue`
-rather than `tank`'s `wait` — for the backup pool a yanked drive should fail the
-receive and be retried, not hang in an ioctl that `SIGKILL` cannot free.
+The destination gets `failmode=continue` rather than `tank`'s `wait` — for the
+backup pool a yanked drive should fail the receive and be retried, not hang in an
+ioctl that `SIGKILL` cannot free.
+
+**`readonly=on` is set and then read back to confirm it took**, on every run
+including one that finds nothing to send. That is not belt-and-braces: `zfs set
+readonly` needs a remount, and it fails if something is holding the mount — so a
+fire-and-forget `zfs set` can leave the backup writable while the script exits 0.
+The datasets are unmounted first, since nothing should be mounted there in normal
+operation. A backup that quietly stops being read-only is the worst class of
+failure available here, because it still reads as covered.
 
 **Known limit:** `recv -F` makes the destination mirror the source's snapshot
 history rather than exceed it. Delete a file, let retention prune the snapshot

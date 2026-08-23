@@ -49,9 +49,17 @@ sudo sh tests/backup-restore/test-backup-restore.sh cleanup
 sudo /usr/local/zfs/bin/zpool export tankbak
 ```
 
-Expect `passed 17, failed 0` — 1 import, 1 key load, 3 mounts, 9 checksums
-(3 datasets × 3 files), 3 write probes. The count moves with `FILES_PER_DS`;
-what matters is `failed 0`.
+Expect `passed 20, failed 0` — 1 import, 1 key load, 3 mounts, 9 checksums
+(3 datasets × 3 files), 3 write probes, 3 unmounts. The count moves with
+`FILES_PER_DS`; what matters is `failed 0`.
+
+**The unmounts at the end are load-bearing, not tidiness.** This is the only
+thing that ever mounts the destination — `recv -u` leaves it alone in normal
+operation — so this phase owns undoing it. An earlier version did not, and the
+next sync silently ended with the backup **writable**: `zfs set readonly=on`
+needs a remount, could not get one while the volumes were freshly mounted and
+being indexed, and its failure was not checked. The same contention made
+`zpool export` take 100 seconds instead of moments.
 
 ## What each failure means
 
