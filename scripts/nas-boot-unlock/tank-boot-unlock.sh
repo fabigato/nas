@@ -302,8 +302,8 @@ else
 	"$ZFS" load-key "$POOL" >>"$LOG" 2>&1
 	rc=$?
 	if [ "$rc" -ne 0 ]; then
-		log "FAIL: zfs load-key exited $rc — check /etc/zfs/keys/tank.key"
-		log "      (passphrase is escrowed in pass at nas/tank-key)"
+		log "FAIL: zfs load-key exited $rc — check the key file"
+		log "      (zfs get keylocation $POOL says where it should be)"
 		exit 1
 	fi
 	log "load-key OK"

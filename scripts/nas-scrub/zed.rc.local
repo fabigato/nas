@@ -42,7 +42,7 @@
 # first and every notification went nowhere while looking fine.
 #
 # The URL is a bearer credential: anyone holding it can post to the server.
-# Hence chmod 600, and escrow it in pass next to nas/tank-key.
+# Hence chmod 600, and keep a copy in a password manager.
 ZED_SLACK_WEBHOOK_URL="https://discord.com/api/webhooks/<id>/<token>/slack"
 
 # --------------------------------------------------------------------------

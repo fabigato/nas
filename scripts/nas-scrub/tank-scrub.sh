@@ -84,8 +84,8 @@
 # calendar reminder to glance at the log after the 1st is the cheap version.
 #
 # The webhook URL is a bearer credential: anyone holding it can post to the
-# server. zed.rc should be chmod 600, and the URL escrowed in pass next to
-# nas/tank-key. Regenerate it in Discord if it leaks.
+# server. zed.rc should be chmod 600, and the URL kept in a password manager.
+# Regenerate it in Discord if it leaks.
 
 set -u
 
