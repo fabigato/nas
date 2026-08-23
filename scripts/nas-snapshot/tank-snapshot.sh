@@ -641,13 +641,20 @@ esac
 #   weekend. No monthly: paying retention for something replaceable is the one
 #   thing this dataset exists to avoid.
 #
-# tank/backups — large and cold. Two weeklies, same fat-finger insurance.
+# Three datasets, not four: tank/backups was destroyed 2026-08-23. It was empty
+# and had no defined job, and it did not fit the axis the rest of the layout is
+# organised on — replaceability. "Backups" is a category of content, not a
+# category of how hard something is to get back, so there was no principled
+# retention number to give it. If a Time Machine target is ever wanted, it gets
+# created then, with a quota, rather than left standing as a name with no work.
+#
+# Adding a dataset here means adding it to tests/snapshot-retention/ too: the
+# keep counts are duplicated there on purpose, and ALL_DS drives its write loop.
 # ---------------------------------------------------------------------------
 
 process_dataset tank/my_media    0  8  6
 process_dataset tank/documents   7  4  6
 process_dataset tank/media       0  2  0
-process_dataset tank/backups     0  2  0
 
 # ---------------------------------------------------------------------------
 # Summary, space accounting, and the heartbeat.

@@ -51,7 +51,7 @@ DS=tank/documents
 # no writes correctly takes exactly one baseline snapshot and never fills its
 # tier. Writing only to $DS would make every other dataset's count assertion
 # fail against a perfectly correct daemon.
-ALL_DS="tank/my_media tank/documents tank/media tank/backups"
+ALL_DS="tank/my_media tank/documents tank/media"
 
 SCRATCH_DIR=.zfstest
 LOG=/tmp/tank-snapshot-test-retention.log
@@ -66,7 +66,6 @@ KEEP_DOCS_DAILY=7
 KEEP_DOCS_WEEKLY=4
 KEEP_DOCS_MONTHLY=6
 KEEP_MEDIA_WEEKLY=2
-KEEP_BACKUPS_WEEKLY=2
 
 # Enough runs to overshoot the deepest tier (my_media weekly, 8) by one. Raising
 # this is the only thing to change if a keep count goes above 8.
@@ -240,7 +239,6 @@ check "$DS test-daily count"    "$(count "$DS" daily)"    "$KEEP_DOCS_DAILY"
 check "$DS test-weekly count"   "$(count "$DS" weekly)"   "$KEEP_DOCS_WEEKLY"
 check "$DS test-monthly count"  "$(count "$DS" monthly)"  "$KEEP_DOCS_MONTHLY"
 check "tank/media test-weekly count"   "$(count tank/media weekly)"   "$KEEP_MEDIA_WEEKLY"
-check "tank/backups test-weekly count" "$(count tank/backups weekly)" "$KEEP_BACKUPS_WEEKLY"
 
 # Tiers that are OFF (keep 0) must produce nothing at all. These are the
 # assertions that catch a tier switched on by accident, and they matter most on
@@ -249,7 +247,6 @@ check "tank/backups test-weekly count" "$(count tank/backups weekly)" "$KEEP_BAC
 check "tank/my_media test-daily count (tier off)" "$(count tank/my_media daily)" "0"
 check "tank/media test-daily count (tier off)"    "$(count tank/media daily)"    "0"
 check "tank/media test-monthly count (tier off)"  "$(count tank/media monthly)"  "0"
-check "tank/backups test-daily count (tier off)"  "$(count tank/backups daily)"  "0"
 
 echo
 echo "=== 4. the survivors are the NEWEST, not an arbitrary subset ==="
