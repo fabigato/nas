@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.tank-snapshot</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/tank-snapshot.sh</string>
+	</array>
+
+	<!-- DAILY, 02:00. One job, one cadence, for all three retention tiers.
+
+	     Note what is NOT here: no Weekday key, no Day key, and no second or
+	     third plist. The weekly and monthly tiers are not driven by this
+	     calendar at all — the script decides a tier is due by looking at the AGE
+	     of the newest snapshot in that tier. See decision 1 in the script header
+	     for why, but the short version is that launchd runs a missed
+	     StartCalendarInterval job once at the next wake, so `Weekday 0` plus an
+	     "is it Sunday?" check in the script would silently skip the weekly tier
+	     for as long as the Mac happens to be asleep on Sunday mornings. Age-based
+	     due-ness has no such hole and makes the script idempotent.
+
+	     02:00 rather than 03:00 so this is finished long before the monthly scrub
+	     starts on the 1st. They do not conflict — a snapshot during a scrub is
+	     harmless, and vice versa — but an hour of separation keeps the two logs
+	     readable when something does go wrong on the same night.
+
+	     A run is seconds: a handful of ioctls and one `zfs list`. There is no
+	     watch loop here, unlike the scrub daemon. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>2</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+
+	<!-- Explicitly false. With RunAtLoad true, every reboot and every reinstall
+	     of this plist would trigger a run. That is harmless in itself — the
+	     script is idempotent and would find nothing due — but it means the log
+	     fills with runs that had nothing to do, which is exactly the noise that
+	     makes a real failure easy to miss. -->
+	<key>RunAtLoad</key>
+	<false/>
+
+	<!-- The script exits nonzero on purpose (2 = an operation failed, 3 = a
+	     configured dataset is missing) and KeepAlive would read those as
+	     something to retry. Retrying a config error in a loop is not a fix. -->
+	<key>KeepAlive</key>
+	<false/>
+
+	<key>StandardOutPath</key>
+	<string>/var/log/tank-snapshot.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/tank-snapshot.launchd.log</string>
+</dict>
+</plist>

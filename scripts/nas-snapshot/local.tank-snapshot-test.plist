@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- TEST HARNESS ONLY — never leave this bootstrapped.
+
+	     Same program as local.tank-snapshot, with three differences, all of them
+	     about making a once-a-day job observable in one sitting:
+
+	       1. All three tier intervals are 1 second and the slack is 0, so every
+	          kickstart finds every enabled tier due. That is what makes the
+	          retention/prune path reachable at all — on the real schedule it
+	          takes eight days to accumulate a ninth weekly snapshot.
+	       2. TANK_SNAPSHOT_PREFIX=test, so every snapshot this creates is named
+	          test-<tier>-<stamp>. This is a safety property, not a convenience:
+	          cleanup scoped to `test-*` cannot delete a production `auto-*`
+	          snapshot no matter how wrong the cleanup command is, and the
+	          production pruner's own `^auto-<tier>-[0-9]` anchor means it will
+	          never touch these either. The two namespaces cannot collide.
+	       3. Heartbeat interval 1, so the notification path gets exercised
+	          instead of being skipped for the next 30 days.
+
+	     WHY A WHOLE SECOND PLIST rather than env vars at test time:
+	       sudo launchctl setenv TANK_SNAPSHOT_DAILY_SECS 1
+	     fails with
+	       150: Operation not permitted while System Integrity Protection is engaged
+	     because it mutates launchd's global environment, which SIP forbids.
+	     Per-job EnvironmentVariables is allowed. Measured 2026-08-22 while
+	     building the scrub daemon; do not reach for setenv again.
+
+	     THIS IS A FAITHFUL TEST OF THE PRODUCTION JOB, not an approximation. TCC
+	     attributes device access to the binary being executed —
+	     /usr/local/zfs/bin/zfs — not to the launchd label, so the Full Disk
+	     Access context here is identical to local.tank-snapshot. Same uid, same
+	     empty environment, same missing GUI session, same minimal PATH. That is
+	     the whole point: a terminal run proves nothing, because sudo inherits the
+	     terminal app's FDA grant, which is exactly how the boot-unlock bug hid
+	     for three cold boots.
+
+	     WHAT IT STILL DOES NOT PROVE, stated so it is not mistaken for covered:
+	     with every interval at 1 second, this never exercises the "not due"
+	     branch or the SLACK_SECS arithmetic, and because the tiers all fire in
+	     the same run it cannot show a weekly outliving seven dailies. Kickstart
+	     the PRODUCTION label once for the "not due" path — it will find nothing
+	     due and exit 0 in under a second, which is itself the test.
+
+	     Usage:
+	       sudo launchctl bootstrap system /Library/LaunchDaemons/local.tank-snapshot-test.plist
+	       sudo launchctl kickstart -k system/local.tank-snapshot-test
+	       ... watch /var/log/tank-snapshot.log ...
+	       sudo launchctl bootout system/local.tank-snapshot-test
+	       sudo rm /Library/LaunchDaemons/local.tank-snapshot-test.plist
+	     The last two lines are not optional. Leaving this loaded means an
+	     unscheduled job that fires on the next `bootstrap` of the system domain.
+
+	     Cleanup of what it created:
+	       zfs list -H -t snapshot -o name -r tank | grep '@test-'
+	       ... read that list, then ...
+	       zfs list -H -t snapshot -o name -r tank | grep '@test-' | xargs -n1 sudo zfs destroy
+	  -->
+
+	<key>Label</key>
+	<string>local.tank-snapshot-test</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/tank-snapshot.sh</string>
+	</array>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>TANK_SNAPSHOT_PREFIX</key>
+		<string>test</string>
+		<key>TANK_SNAPSHOT_DAILY_SECS</key>
+		<string>1</string>
+		<key>TANK_SNAPSHOT_WEEKLY_SECS</key>
+		<string>1</string>
+		<key>TANK_SNAPSHOT_MONTHLY_SECS</key>
+		<string>1</string>
+		<key>TANK_SNAPSHOT_SLACK_SECS</key>
+		<string>0</string>
+		<key>TANK_SNAPSHOT_HEARTBEAT_SECS</key>
+		<string>1</string>
+	</dict>
+
+	<!-- No StartCalendarInterval on purpose: this job must only ever run when
+	     kickstarted by hand. -->
+	<key>RunAtLoad</key>
+	<false/>
+	<key>KeepAlive</key>
+	<false/>
+
+	<key>StandardOutPath</key>
+	<string>/var/log/tank-snapshot.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/tank-snapshot.launchd.log</string>
+</dict>
+</plist>
