@@ -112,6 +112,23 @@ ZPOOL=/usr/local/zfs/bin/zpool
 SRC_POOL=tank
 DST_POOL=${TANK_BACKUP_DST:-tankbak}
 
+# Where to look for the destination pool's devices. THIS IS NOT OPTIONAL AND IT
+# IS NOT THE DEFAULT.
+#
+# A bare `zpool import tankbak` searches the default path, which resolves devices
+# through by-id — GPT UUIDs like media-F8800B76-94DD-3843-BB21-67242CBF1E3D. On
+# 2026-08-23 that failed after an ordinary unplug/replug cycle:
+#     cannot import 'tankbak': one or more devices is currently unavailable
+# after burning 2m15s, while a plain scan simultaneously reported the pool as
+# ONLINE and importable. Adding -d /var/run/disk/by-serial imported it instantly.
+#
+# This is the same lesson the pool build already recorded for `tank` — import by
+# by-serial, never by-id — and tank-boot-unlock.sh passes explicit by-serial
+# device paths for precisely this reason. It just never got carried into this
+# script. It is a property of the naming layer, not of the drive, so it would
+# have bitten the real backup drive exactly the same way.
+DEV_DIR=${TANK_BACKUP_DEV_DIR:-/var/run/disk/by-serial}
+
 # Datasets to replicate, as bare names under both pools. Everything, currently:
 # `media` is re-downloadable but is being kept anyway. If the destination ever
 # runs short of space, this is the line to cut — which is the payoff for having
@@ -228,10 +245,19 @@ esac
 # auto-import is off via /etc/zfs/noautoimport and tank-boot-unlock.sh imports
 # `tank` by name only.
 if ! "$ZPOOL" list -H -o name "$DST_POOL" >/dev/null 2>&1; then
-	log "$DST_POOL not imported — importing"
-	if ! run "$ZPOOL" import "$DST_POOL"; then
-		log "REFUSED: could not import $DST_POOL. Is the drive plugged in?"
-		log "         Available pools: $("$ZPOOL" import 2>&1 | awk '/pool:/{print $2}' | tr '\n' ' ')"
+	log "$DST_POOL not imported — importing from $DEV_DIR"
+	if ! run "$ZPOOL" import -d "$DEV_DIR" "$DST_POOL"; then
+		log "REFUSED: could not import $DST_POOL from $DEV_DIR."
+		# Print the WHOLE scan, not a grep of it. An earlier version reduced this
+		# to a list of pool names, which threw away the config block naming the
+		# unavailable device and its state — i.e. the only part that explains the
+		# failure. The diagnostic then had to be re-run by hand anyway.
+		log "         Scan of $DEV_DIR follows:"
+		"$ZPOOL" import -d "$DEV_DIR" 2>&1 | sed 's/^/         /' | tee -a "$LOG"
+		log "         Devices present in $DEV_DIR:"
+		ls "$DEV_DIR" 2>&1 | sed 's/^/         /' | tee -a "$LOG"
+		log "         If the drive is plugged in and the pool shows as ONLINE above,"
+		log "         try a different search dir: zpool import -d /dev $DST_POOL"
 		exit 1
 	fi
 fi
@@ -311,21 +337,27 @@ prune_sync() {
 # Make every destination dataset readonly=on, and PROVE it rather than assume.
 # Returns the number that could not be set.
 #
-# WHY THIS IS VERIFIED AND NOT A FIRE-AND-FORGET `zfs set`:
-# Measured 2026-08-23. The first two syncs ended readonly=on; the third ended
-# readonly=OFF on all three datasets, with the send succeeding and the script
-# exiting 0. The difference was that the restore test had mounted the datasets
-# and left them mounted, and `zfs set readonly` needs a remount it could not
-# get — plausibly because macOS had started Spotlight-indexing three volumes
-# that had just appeared. The same contention made `zpool export` take 100s.
+# WHY THIS UNMOUNTS FIRST, AND WHAT IT IS *NOT* FOR:
 #
-# The mechanism is inference; the defect was not. The old code discarded the
-# exit status of the one property that stops anything other than this script
-# writing to the backup. A backup that quietly stops being read-only is the
-# worst class of failure here, because it still reads as covered.
+# `zfs get readonly` on a MOUNTED dataset can report the mount's state rather
+# than the stored property. Measured 2026-08-23: the third sync's epilogue
+# printed readonly=off for all three datasets, because the restore test had
+# mounted them and left them that way. The stored property was `on` with source
+# `local` the entire time — confirmed after the next export/import, with nothing
+# having set it in between. The `zfs set` had worked. Only the reading misled.
 #
-# So: unmount first — nothing should be mounted here in normal operation, since
-# recv -u leaves them alone — then set, then read the property back.
+# So the alarming version of this — "the backup silently became writable" — was
+# wrong, and the property was never lost. What IS true is narrower: while a
+# dataset is mounted read-write, writes through that existing mount succeed until
+# it is remounted. Unmounting first closes that gap by making the effective state
+# match the property immediately.
+#
+# Reading the property back afterwards is cheap insurance, not a fix for an
+# observed failure. Worth keeping anyway: `zfs set` can genuinely fail, and the
+# old code discarded its exit status, so a real failure would have been silent.
+#
+# Nothing should be mounted here in normal operation — recv -u leaves the
+# datasets alone, and the restore test now unmounts what it mounts.
 enforce_readonly() {
 	_bad=0
 	for _name in $DATASETS; do
@@ -345,11 +377,13 @@ enforce_readonly() {
 
 		_ro=$("$ZFS" get -H -o value readonly "$_d" 2>/dev/null)
 		if [ "$_ro" != "on" ]; then
-			log "FAIL: $_d is readonly='$_ro' and could not be set to on."
-			log "      THE BACKUP IS WRITABLE BY ANYTHING. Something holds the mount:"
-			log "      zfs get mounted,readonly $_d"
-			log "      Check for a stray mount from tests/backup-restore/, and for"
-			log "      Spotlight indexing the volume."
+			log "FAIL: $_d reads readonly='$_ro' and could not be set to on."
+			log "      If it is still mounted, this may be the mount's state rather"
+			log "      than the stored property — check both, they can disagree:"
+			log "      zfs get -o all mounted,readonly $_d"
+			log "      A 'local' source of 'on' means the property is fine and only"
+			log "      the live mount is writable. Look for a stray mount from"
+			log "      tests/backup-restore/ before assuming the backup is exposed."
 			_bad=$((_bad + 1))
 		else
 			log "  $_d readonly=on"

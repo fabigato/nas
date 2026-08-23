@@ -184,13 +184,16 @@ The destination gets `failmode=continue` rather than `tank`'s `wait` — for the
 backup pool a yanked drive should fail the receive and be retried, not hang in an
 ioctl that `SIGKILL` cannot free.
 
-**`readonly=on` is set and then read back to confirm it took**, on every run
-including one that finds nothing to send. That is not belt-and-braces: `zfs set
-readonly` needs a remount, and it fails if something is holding the mount — so a
-fire-and-forget `zfs set` can leave the backup writable while the script exits 0.
-The datasets are unmounted first, since nothing should be mounted there in normal
-operation. A backup that quietly stops being read-only is the worst class of
-failure available here, because it still reads as covered.
+**The destination datasets are unmounted before `readonly=on` is set**, and the
+property is read back afterwards, on every run including one that finds nothing
+to send. Nothing should be mounted there in normal operation — `recv -u` leaves
+them alone — so a mount means something else left one behind.
+
+Worth knowing if you ever debug this: **`zfs get readonly` on a *mounted* dataset
+can report the mount's state rather than the stored property.** Always check
+`zfs get -o all readonly <dataset>` and look at the `source` column; a `local`
+source of `on` means the property is fine and only the live mount is writable.
+Reading the value alone will convince you the backup is exposed when it isn't.
 
 **Known limit:** `recv -F` makes the destination mirror the source's snapshot
 history rather than exceed it. Delete a file, let retention prune the snapshot
