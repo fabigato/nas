@@ -1,6 +1,7 @@
 #!/bin/sh
 #
-# tank-boot-unlock.sh — bring the encrypted pool `tank` fully online at boot.
+# tank-boot-unlock.sh — bring the encrypted pool `tank` fully online, at boot
+# and whenever its disks appear.
 #
 # An encrypted pool needs three distinct steps, in this order:
 #   1. zpool import    attach the disks
@@ -9,6 +10,19 @@
 # The OpenZFS package's own daemons do 1, attempt 3, and never do 2 — they
 # assume unencrypted pools. So we switch them off with /etc/zfs/noautoimport
 # and own the whole chain here.
+#
+# TRIGGERED TWO WAYS, and it matters which:
+#   RunAtLoad   — once at boot, for the enclosure that is already powered on.
+#   WatchPaths  — on any change to /var/run/disk/by-serial, i.e. whenever a disk
+#                 arrives. This is what handles switching the Orico on after the
+#                 Mac is already up, which RunAtLoad alone cannot: the boot run
+#                 has long since exited by then. Added 2026-08-24 after exactly
+#                 that left the pool offline for hours (see step 1).
+#
+# So this script is run OFTEN and mostly with nothing to do. Every step is
+# therefore idempotent and step 0 exits early and silently when the pool is
+# already up. Keep it that way: anything added below must be safe to run
+# against a healthy, mounted pool, because it will be, many times a day.
 #
 # ############################################################################
 # # HARD PREREQUISITE — Full Disk Access. Without it NOTHING below works.    #
@@ -43,6 +57,17 @@
 # grant, which is precisely why every manual run succeeded while every boot
 # failed.
 #
+# To test the WatchPaths path specifically, kickstart does not exercise it —
+# only a real disk event does:
+#   sudo zpool export tank
+#   <power the enclosure off, wait for the by-serial links to vanish, on again>
+#   tail -f /var/log/tank-boot-unlock.log
+# Expect a run with at_boot=no that imports and mounts within ~seconds. If the
+# log stays silent, WatchPaths is not firing — check the plist is loaded
+# (`sudo launchctl print system/local.tank-boot-unlock`) before suspecting this
+# script. If instead it logs "already online" no-ops, that is step 0 doing its
+# job; look at /var/log/tank-boot-unlock.heartbeat for proof of life.
+#
 # Rollback: sudo launchctl bootout system/local.tank-boot-unlock
 #           sudo rm /Library/LaunchDaemons/local.tank-boot-unlock.plist
 #           sudo rm /etc/zfs/noautoimport
@@ -63,11 +88,74 @@ DISK0="$BYSERIAL/USB30_DISK00-20170331000C3"
 DISK1="$BYSERIAL/USB30_DISK01-20170331000C3"
 
 LOG=/var/log/tank-boot-unlock.log
+
+# Touched on every no-op exit. The plist's WatchPaths fires this script on any
+# change to $BYSERIAL — every USB plug/unplug, not just ours — so the common
+# case is "nothing to do". Recording that in $LOG would bury the runs that
+# matter under hundreds of lines, so no-ops leave a mtime here instead.
+# Same convention as tank-snapshot.heartbeat. `ls -l` it to prove we are alive.
+HEARTBEAT=/var/log/tank-boot-unlock.heartbeat
+
+# Two wait budgets, because the two ways in have opposite best answers.
+#
+# At boot the enclosure may be powered but still enumerating, and there is no
+# second chance — so wait a long time.
+#
+# On a WatchPaths trigger the directory ALREADY changed. Either our links are
+# there now, or this was somebody else's device and ours will fire their own
+# trigger when they appear. Waiting long here would park the job and delay the
+# response to the trigger that actually is ours, so wait barely at all.
 WAIT_SECS=120
+TRIGGER_WAIT_SECS=20
+
+# How long after boot a run still counts as "the boot run". Generous: it only
+# has to exceed the worst observed enumeration, and being wrong costs one extra
+# 120s wait, whereas being wrong the other way costs a pool that stays offline.
+BOOT_WINDOW_SECS=300
+
 IMPORT_TRIES=12
 IMPORT_DELAY=5
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >>"$LOG"; }
+
+# Seconds since boot, from kern.boottime. On any parse failure return 0, which
+# reads as "we are at boot" and buys the LONGER wait — fail toward patience.
+#
+# kern.boottime prints `{ sec = 1787577869, usec = 53649 }`. Match the FIRST
+# number, anchored: the obvious `.*sec = \([0-9]*\)` is greedy, matches through
+# `usec = `, and hands back the microseconds — a 5-digit epoch that puts boot in
+# 1970 and makes every boot run look like a late trigger. Caught in test, but it
+# would have been near-invisible in production: the pool still comes up, just
+# with the 20s budget instead of 120s, so it would only bite on a slow spin-up.
+#
+# The range check is the real backstop. Any parse that yields something not
+# plausibly a current epoch is treated as unknown rather than trusted.
+uptime_secs() {
+	boot=$(/usr/sbin/sysctl -n kern.boottime 2>/dev/null |
+		sed -n 's/^[^0-9]*\([0-9][0-9]*\).*/\1/p')
+	case $boot in
+	'' | *[!0-9]*) echo 0; return ;;
+	esac
+	[ "$boot" -gt 1600000000 ] || { echo 0; return; }
+	now=$(date +%s)
+	elapsed=$((now - boot))
+	[ "$elapsed" -ge 0 ] || elapsed=0
+	echo "$elapsed"
+}
+
+# Is the pool already imported, decrypted AND mounted? Returns 0 if yes.
+#
+# This is what makes the script safe to fire on every disk event. All three
+# have to hold: a pool can be imported with no key, or keyed with nothing
+# mounted, and either of those still needs us. canmount=off datasets never
+# mount by design (tank itself is one), so they must not count as missing.
+already_online() {
+	"$ZPOOL" list -H -o name "$POOL" >/dev/null 2>&1 || return 1
+	[ "$("$ZFS" get -H -o value keystatus "$POOL" 2>/dev/null)" = available ] || return 1
+	pending=$("$ZFS" list -r -H -o name,mounted,canmount "$POOL" 2>/dev/null |
+		awk '$3 != "off" && $2 == "no"' | wc -l | tr -d ' ')
+	[ "$pending" = 0 ]
+}
 
 # Is the raw device read being refused by TCC? Returns 0 if yes.
 #
@@ -144,20 +232,57 @@ timed_import() {
 	return "$rc"
 }
 
-log "--- start (pid $$) ---"
+# 0. Nothing to do? Leave without saying a word.
+#
+#    Must come before the first log line, or WatchPaths churn fills the log with
+#    empty runs. Everything below step 0 is idempotent anyway (step 2 skips an
+#    imported pool, step 3 guards on keystatus, `zfs mount -a` is a no-op when
+#    mounted) — this is purely about keeping $LOG readable.
+if already_online; then
+	touch "$HEARTBEAT" 2>/dev/null
+	exit 0
+fi
+
+# Boot run, or a disk-arrival trigger? Only the wait budget differs.
+elapsed=$(uptime_secs)
+if [ "$elapsed" -lt "$BOOT_WINDOW_SECS" ]; then
+	at_boot=yes
+	wait_secs=$WAIT_SECS
+else
+	at_boot=no
+	wait_secs=$TRIGGER_WAIT_SECS
+fi
+
+log "--- start (pid $$, ${elapsed}s after boot, at_boot=$at_boot) ---"
 
 # 1. Wait for the enclosure to enumerate and InvariantDisks to publish its
 #    by-serial symlinks. USB is slow at boot and launchd guarantees no ordering
 #    between us and org.openzfsonosx.InvariantDisks, so poll rather than assume.
+#
+#    This poll used to be the ONLY way in, which is exactly how 2026-08-24 went
+#    wrong: booted 15:24, gave up 15:26:45, enclosure switched on by hand and
+#    its links appeared 15:29 — with nothing left running to notice, and a log
+#    line blaming a dead disk. WatchPaths in the plist is now the real trigger;
+#    this loop only covers the enumeration lag when the disks are already on.
 waited=0
-while [ "$waited" -lt "$WAIT_SECS" ]; do
+while [ "$waited" -lt "$wait_secs" ]; do
 	[ -e "$DISK0" ] && [ -e "$DISK1" ] && break
 	waited=$((waited + 1))
 	sleep 1
 done
 if [ ! -e "$DISK0" ] || [ ! -e "$DISK1" ]; then
+	# Not our event. Somebody plugged in something else while tank is off —
+	# routine, so exit 0 and stay quiet, or `last exit code` stops meaning
+	# anything. The arrival of OUR links will fire its own trigger.
+	if [ "$at_boot" = no ]; then
+		log "disks absent after ${waited}s on a non-boot trigger; not our event"
+		touch "$HEARTBEAT" 2>/dev/null
+		exit 0
+	fi
 	log "FAIL: by-serial links still absent after ${waited}s."
-	log "      Enclosure powered off, unplugged, or a disk is dead. Giving up."
+	log "      Enclosure powered off, unplugged, or a disk is dead."
+	log "      If it was merely off: switch it on and WatchPaths will re-run"
+	log "      this automatically — no reboot, no manual command needed."
 	exit 1
 fi
 log "both disks visible after ${waited}s"

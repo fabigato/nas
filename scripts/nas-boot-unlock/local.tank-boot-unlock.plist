@@ -15,8 +15,36 @@
 	<key>RunAtLoad</key>
 	<true/>
 
-	<!-- Do not restart it. If it fails, it failed for a reason worth reading in
-	     the log, and a retry loop would just spin against a dead enclosure. -->
+	<!-- Re-run whenever a disk arrives or leaves. RunAtLoad alone only covers an
+	     enclosure that is already powered on at boot; switch the Orico on later
+	     and the boot run has already exited, so nothing imports the pool. That
+	     is what happened on 2026-08-24 — booted 15:24, gave up 15:26, disks
+	     appeared 15:29, pool stayed offline with the log blaming a dead drive.
+
+	     InvariantDisks owns this directory, so a change here is the earliest
+	     reliable signal that ZFS could open the vdevs.
+
+	     This fires on EVERY disk event, ours or not — a USB stick, a phone, a
+	     DMG mount. That is fine only because tank-boot-unlock.sh exits early and
+	     silently when the pool is already online. Do not point WatchPaths at
+	     this script without that guard in place. -->
+	<key>WatchPaths</key>
+	<array>
+		<string>/var/run/disk/by-serial</string>
+	</array>
+
+	<!-- InvariantDisks publishes the links one at a time — disk4, disk4s1,
+	     disk4s9, disk5, ... — so a single power-on is several events. Throttle so
+	     that becomes a couple of runs rather than a dozen. launchd's default is
+	     10s; 15 is enough to coalesce one enclosure spin-up without noticeably
+	     delaying the mount. -->
+	<key>ThrottleInterval</key>
+	<integer>15</integer>
+
+	<!-- Do not restart it on exit. If it fails, it failed for a reason worth
+	     reading in the log, and a retry loop would just spin against a dead
+	     enclosure. Retrying is WatchPaths' job now, and only when the disk state
+	     actually changes — which is the only time a retry could succeed. -->
 	<key>KeepAlive</key>
 	<false/>
 
