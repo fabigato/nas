@@ -1,0 +1,67 @@
+{
+    "//": [
+        "Seed only. Jellyfin reads logging.json if present and falls back to",
+        "logging.default.json otherwise; it never rewrites this file, so unlike",
+        "the two XML seeds this one stays authoritative.",
+        "",
+        "One change from the shipped default: the Console sink is held at",
+        "Warning while the File sink stays at Information.",
+        "",
+        "Why. Under --service, console output is stdout, and launchd sends",
+        "stdout to /var/log/jellyfin-server.launchd.log. At Information that",
+        "file becomes a byte-for-byte duplicate of the real log in",
+        "/var/log/jellyfin/ — which Jellyfin already rotates itself (daily, 3",
+        "retained). Duplicating it costs nothing in disk but a lot in signal:",
+        "the launchd log is where an operator looks when the daemon will not",
+        "start, and a startup failure is invisible in a thousand lines of",
+        "scheduled-task chatter. Held at Warning it is ~6 lines per start",
+        "instead of ~214, which is small enough to read at a glance.",
+        "",
+        "Measured, so the baseline is known: those six are five MediaEncoder",
+        "warnings about CUDA/VAAPI/Vulkan filters that no Apple silicon build",
+        "has, plus one StaticFileMiddleware note about a missing ASP.NET",
+        "wwwroot that does not apply because -w passes the web client",
+        "explicitly. They recur on every start and are not a problem. First",
+        "start adds EF Core migration warnings which do not recur.",
+        "",
+        "The full-detail log is not lost, it just lives in one place:",
+        "/var/log/jellyfin/log_*.log."
+    ],
+    "Serilog": {
+        "MinimumLevel": {
+            "Default": "Information",
+            "Override": {
+                "Microsoft": "Warning",
+                "System": "Warning"
+            }
+        },
+        "WriteTo": [
+            {
+                "Name": "Console",
+                "Args": {
+                    "restrictedToMinimumLevel": "Warning",
+                    "outputTemplate": "[{Timestamp:HH:mm:ss}] [{Level:u3}] [{ThreadId}] {SourceContext}: {Message:lj}{NewLine}{Exception}"
+                }
+            },
+            {
+                "Name": "Async",
+                "Args": {
+                    "configure": [
+                        {
+                            "Name": "File",
+                            "Args": {
+                                "path": "%JELLYFIN_LOG_DIR%//log_.log",
+                                "rollingInterval": "Day",
+                                "retainedFileCountLimit": 3,
+                                "rollOnFileSizeLimit": true,
+                                "fileSizeLimitBytes": 100000000,
+                                "outputTemplate": "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff zzz}] [{Level:u3}] [{ThreadId}] {SourceContext}: {Message}{NewLine}{Exception}"
+                            }
+                        }
+                    ]
+                }
+            }
+        ],
+        "Enrich": [ "FromLogContext", "WithThreadId" ]
+    }
+}

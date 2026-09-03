@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.jellyfin</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/jellyfin-server.sh</string>
+	</array>
+
+	<!-- A LaunchDaemon, not a LaunchAgent, and this is the whole reason the
+	     wrapper script exists. Jellyfin's macOS distribution is a menu-bar app
+	     that installs itself as a login item; with no automatic login on this
+	     machine (a deliberate decision), a login item does not start until
+	     somebody is physically at the keyboard. `com.local.whisper-server` in
+	     ~/Library/LaunchAgents is exactly that, and it is why the media server
+	     could not be one. -->
+
+	<!-- Runs as fabigato. Root is wrong for a network-facing server that parses
+	     untrusted container formats, and the media datasets are owned
+	     fabigato:staff so nothing needs elevating. See decision 4 in the
+	     script header for why not a dedicated service account. -->
+	<key>UserName</key>
+	<string>fabigato</string>
+	<key>GroupName</key>
+	<string>staff</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Unconditional, unlike the other three daemons in this repo. They are
+	     scheduled jobs whose nonzero exits mean "config error, do not retry".
+	     This one is a long-running server, and its nonzero exit means "the pool
+	     was not there" — a condition that fixes itself when the enclosure comes
+	     back. Retrying is the correct response, and it is what makes Jellyfin
+	     recover from an enclosure power-cycle without anyone logging in. -->
+	<key>KeepAlive</key>
+	<true/>
+
+	<!-- launchd's default is 10 s. The wrapper already waits up to 300 s for the
+	     pool before exiting, so the restart cadence with the enclosure off is
+	     ~5.5 minutes rather than a tight loop. 30 s only matters for the other
+	     case: a server that crashes on startup, where 10 s would spin. -->
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+
+	<!-- Idles most of the time, then needs the media engine and real CPU the
+	     moment somebody presses play. That switching is what Adaptive is for;
+	     Background would have launchd throttle I/O on a transcode. -->
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+
+	<!-- launchd hands out a 256-descriptor soft limit by default. A media server
+	     holds the web listener, the SQLite databases, an open handle per active
+	     stream and one per ffmpeg pipe; 256 is reachable on a large library
+	     scan, and the failure surfaces as unrelated-looking IO errors. -->
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>4096</integer>
+	</dict>
+
+	<!-- Default is 20 s, after which launchd escalates to SIGKILL. Jellyfin runs
+	     SQLite query-planner optimisation during shutdown ("Running query planner
+	     optimizations in the database... This might take a while") and a SIGKILL
+	     through that is how a media database gets corrupted. -->
+	<key>ExitTimeOut</key>
+	<integer>60</integer>
+
+	<!-- The wrapper's own guard messages go to /var/log/jellyfin-server.log; the
+	     server's own logs go to /var/log/jellyfin/ via -l, where Jellyfin rotates
+	     them itself (daily, 3 retained). This file therefore only catches console
+	     output, which config-seed/logging.json holds down to Warning.
+
+	     Measured, not assumed: that is ~6 lines per start, not zero. Five are
+	     MediaEncoder complaining that scale_cuda, tonemap_cuda, overlay_vaapi,
+	     overlay_vulkan and overlay_cuda are unavailable — it probes for every
+	     hwaccel backend it knows and reports the ones this build has no hardware
+	     for, which on Apple silicon is all of them except VideoToolbox. One is
+	     StaticFileMiddleware noting there is no ASP.NET `wwwroot` beside the
+	     working directory, which is irrelevant because the web client is passed
+	     explicitly with -w.
+
+	     So the signal is "more than the usual six", not "non-empty". First start
+	     also adds EF Core migration warnings that do not recur. -->
+	<key>StandardOutPath</key>
+	<string>/var/log/jellyfin-server.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/jellyfin-server.launchd.log</string>
+
+	<!-- Without this the daemon inherits / as its working directory. Harmless
+	     for the server, which is given every path it needs as a flag, but it
+	     decides where the wwwroot warning above points and keeps any core dump
+	     or stray relative path inside the state tree. -->
+	<key>WorkingDirectory</key>
+	<string>/usr/local/var/jellyfin</string>
+</dict>
+</plist>

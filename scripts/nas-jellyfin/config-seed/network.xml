@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Seed only. Jellyfin rewrites this file whenever network settings are saved in
+  the web UI, so after first start the installed copy is authoritative and this
+  one is a record of the starting position. `diff` them before assuming.
+
+  Why seed it at all: Jellyfin does not write network.xml until something
+  changes it, and its compiled-in default binds 0.0.0.0. Configuring after first
+  start would therefore mean a window — however short — where an unconfigured
+  server with an open setup wizard is reachable on the LAN at 192.168.2.21:8096.
+  Seeding closes that window instead of racing it.
+
+  Verified by observation, not by trusting the schema: with this file in place
+  the server logs `Bind Addresses ["127.0.0.1"]` and lsof shows exactly one
+  listener, `TCP 127.0.0.1:8096`, with no UDP socket at all.
+-->
+<NetworkConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <BaseUrl />
+
+  <!-- No TLS here, on purpose. `tailscale serve` terminates HTTPS with a real
+       LetsEncrypt certificate for the MagicDNS name and proxies to this
+       listener over loopback. A self-signed cert on 8920 would add a warning
+       page and a second key to rotate, protecting a hop that never leaves the
+       machine. -->
+  <EnableHttps>false</EnableHttps>
+  <RequireHttps>false</RequireHttps>
+  <InternalHttpPort>8096</InternalHttpPort>
+  <InternalHttpsPort>8920</InternalHttpsPort>
+  <PublicHttpPort>8096</PublicHttpPort>
+  <PublicHttpsPort>8920</PublicHttpsPort>
+
+  <!-- THE control that makes this tailnet-only. Everything else is defence in
+       depth. Binding loopback means the only route in is something already
+       running on this machine — which is `tailscale serve`, and Serve is bound
+       tailnet-only on the 100.x address. There is no socket on the LAN
+       interface to find, so this does not depend on a firewall rule, on Serve
+       staying configured, or on anybody's idea of which subnet is trusted. -->
+  <LocalNetworkAddresses>
+    <string>127.0.0.1</string>
+  </LocalNetworkAddresses>
+  <LocalNetworkSubnets />
+
+  <!-- Serve arrives over loopback, so without this every client looks like it
+       is 127.0.0.1 and the access logs are useless. -->
+  <KnownProxies>
+    <string>127.0.0.1</string>
+  </KnownProxies>
+
+  <!-- Off: both are ways of being found by things that were not looking, which
+       is the opposite of the exposure model. AutoDiscovery answers UDP
+       broadcasts on 7359 and UPnP asks the router to forward a port from the
+       internet — the precise thing `tailscale serve` exists to avoid, and the
+       reason funnel was rejected too. -->
+  <AutoDiscovery>false</AutoDiscovery>
+  <EnableUPnP>false</EnableUPnP>
+
+  <EnableIPv4>true</EnableIPv4>
+  <EnableIPv6>false</EnableIPv6>
+
+  <!-- True, and it does not mean what the name suggests. This gates non-LAN
+       clients; with the listener on loopback there is no way to reach the
+       server except through Serve, whose traffic arrives from 127.0.0.1 and is
+       classed as local either way. Setting it false would not add a second
+       lock, it would just be a knob with no effect. -->
+  <EnableRemoteAccess>true</EnableRemoteAccess>
+
+  <IgnoreVirtualInterfaces>true</IgnoreVirtualInterfaces>
+  <EnablePublishedServerUriByRequest>false</EnablePublishedServerUriByRequest>
+  <PublishedServerUriBySubnet />
+  <RemoteIPFilter />
+  <IsRemoteIPFilterBlacklist>false</IsRemoteIPFilterBlacklist>
+</NetworkConfiguration>

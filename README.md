@@ -20,6 +20,7 @@ Everything here assumes the OpenZFS-on-macOS fork with binaries in
 | `scripts/nas-scrub/` | Monthly scrub, with guards and Discord alerting |
 | `scripts/nas-snapshot/` | Daily snapshots with tiered retention |
 | `scripts/nas-backup/` | Replication to an offline, independently-encrypted pool |
+| `scripts/nas-jellyfin/` | The media server the pool exists to serve |
 | `tests/` | Test harnesses — see [Tests](#tests) |
 
 Each script carries a long header comment explaining its own design decisions.
@@ -200,6 +201,56 @@ history rather than exceed it. Delete a file, let retention prune the snapshot
 holding it, then sync, and both copies are gone. Deep retention on the
 irreplaceable dataset is what keeps that window wide.
 
+## Jellyfin — `local.jellyfin`
+
+The reason the pool exists. Serves `tank/media` and `tank/my_media` over
+Tailscale only, and it is the one component here that is a long-running server
+rather than a scheduled job.
+
+**Native, not Docker.** Docker on macOS runs containers in a Linux VM whose
+hypervisor exposes no GPU or media engine, so a containerised Jellyfin can only
+transcode in software — on a machine already sharing CPU with other work.
+Running native buys VideoToolbox and the M4 Max media engine.
+
+**A LaunchDaemon running the server binary, not the app.** Jellyfin ships on
+macOS only as a menu-bar app that installs itself as a login item, and a login
+item never starts on a machine with no automatic login. `brew install --cask
+jellyfin` is used purely to obtain `Contents/MacOS/jellyfin` and the bundled
+VideoToolbox-enabled ffmpeg; the Cocoa wrapper is ignored.
+
+**The wrapper's job is to refuse.** Jellyfin treats a library path that has gone
+missing as a library that has been *emptied*, so a scan against an unmounted
+`/Volumes/tank` would purge its database of every item, and with it all watch
+state and user data. `jellyfin-server.sh` therefore polls for a healthy, mounted
+pool and exits nonzero rather than starting blind. `KeepAlive` then makes that
+self-healing: launchd retries, so the server comes up on its own once the
+enclosure is switched back on, without duplicating the `WatchPaths` logic in the
+boot unlock. It asks `zpool list` before touching any dataset, because
+`failmode=wait` means a suspended pool hangs anything that reaches for it.
+
+**Every writable path is on the internal SSD**, under `/usr/local/var/jellyfin`.
+Transcode scratch is the reason — it is large, constantly rewritten, and both
+media datasets are snapshotted, so scratch on `tank` would be captured by the
+next nightly snapshot and inflate `usedbysnapshots` permanently.
+
+`config-seed/` holds the starting configuration. Two settings are seeded rather
+than clicked in afterwards because both are wrong by default in ways that do not
+announce themselves:
+
+- **`network.xml` binds the listener to `127.0.0.1`.** Jellyfin's compiled-in
+  default is `0.0.0.0` and it does not write this file until something changes
+  it, so configuring after first start would leave a window where an
+  unconfigured server with an open setup wizard is reachable on the LAN. A
+  loopback bind is what makes the exposure tailnet-only *structurally* — there
+  is simply no socket on the LAN interface — rather than depending on a firewall
+  rule or on Serve staying configured. UPnP and UDP autodiscovery are off.
+- **`encoding.xml` sets `HardwareAccelerationType` to `videotoolbox`.** It ships
+  as `none`, which would have made the entire native-over-Docker decision
+  worthless while looking like a working install.
+
+Exposure is `tailscale serve`, never `tailscale funnel`, on its own port —
+`:8443` already belongs to ComfyUI.
+
 ## Install
 
 The repo is the source of truth but installs are manual, so **`diff` before
@@ -286,6 +337,7 @@ that will fire on the next `bootstrap` of the system domain.
 | `tests/snapshot-retention/` | Drives the snapshot pruner past its keep counts and asserts tier depths, that the survivors are the newest, prefix scoping, hold safety, and skip-if-unchanged. Run as root; creates `test-`prefixed snapshots on the live pool and cleans up on exit, including on `SIGINT` |
 | `tests/scan-parse/` | Fixture tests for the scrub daemon's `zpool status` parser, over completed / in-progress / repaired / errored / canceled / resilvering / never-scanned output |
 | `tests/backup-restore/` | Proves the offline backup is *restorable*, not just that the send exited 0: known payload and sha256 manifest, then cold import, passphrase, read-only mount, checksum verification and write-rejection probes. Partly manual — the physical unplug in the middle is the point and cannot be scripted |
+| `tests/jellyfin-readonly/` | Asserts Jellyfin writes nothing into the media datasets, via `written@` and `zfs diff` across a full library scan. Three phases, because the scan in the middle is slow. macOS's own `.DS_Store` / Spotlight writes are classified as noise rather than failures |
 | `tests/2026-08-17-drive-pull/` | Procedure, observation harness and captured logs from physically pulling a drive from the running mirror |
 
 Two things to know before editing `tests/snapshot-retention/`:

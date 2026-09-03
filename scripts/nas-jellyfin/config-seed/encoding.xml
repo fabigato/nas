@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Seed only — Jellyfin rewrites this file when the Playback → Transcoding page
+  is saved. Four values differ from the shipped defaults; everything else here
+  is the default, kept verbatim so a `diff` against the installed copy shows
+  drift rather than noise.
+
+  The defaults this corrects, in order of how badly they would have bitten:
+
+  1. HardwareAccelerationType shipped as `none`. The entire native-over-Docker
+     decision was made to get the M4 Max media engine, and out of the box
+     Jellyfin would have transcoded in software anyway — on a machine already
+     sharing CPU with comfyui and the local LLM stack. It would have looked like
+     a working install. Confirm the fix in the logs, per the check in
+     tests/jellyfin-readonly/README.md; a silent software fallback also looks
+     like a working install.
+
+  2. TranscodingTempPath empty means `<cachedir>/transcodes`. That is already on
+     the internal SSD here, so this line changes nothing today — it is written
+     out explicitly so that a future edit to the cache path cannot quietly move
+     transcode scratch onto `tank`. Scratch on a snapshotted 1M-recordsize
+     dataset is captured by the next nightly snapshot and inflates
+     `usedbysnapshots` with data nobody will ever want back.
+-->
+<EncodingOptions xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <EncodingThreadCount>-1</EncodingThreadCount>
+  <TranscodingTempPath>/usr/local/var/jellyfin/transcodes</TranscodingTempPath>
+  <EnableFallbackFont>false</EnableFallbackFont>
+  <EnableAudioVbr>false</EnableAudioVbr>
+  <DownMixAudioBoost>2</DownMixAudioBoost>
+  <DownMixStereoAlgorithm>None</DownMixStereoAlgorithm>
+  <MaxMuxingQueueSize>2048</MaxMuxingQueueSize>
+  <EnableThrottling>false</EnableThrottling>
+  <ThrottleDelaySeconds>180</ThrottleDelaySeconds>
+  <EnableSegmentDeletion>false</EnableSegmentDeletion>
+  <SegmentKeepSeconds>720</SegmentKeepSeconds>
+
+  <!-- CHANGED from `none`. -->
+  <HardwareAccelerationType>videotoolbox</HardwareAccelerationType>
+
+  <EncoderAppPathDisplay>/Applications/Jellyfin.app/Contents/MacOS/ffmpeg</EncoderAppPathDisplay>
+  <VaapiDevice>/dev/dri/renderD128</VaapiDevice>
+  <QsvDevice />
+  <EnableTonemapping>false</EnableTonemapping>
+  <EnableVppTonemapping>false</EnableVppTonemapping>
+
+  <!-- CHANGED from false, and it matters more for this pool than for a typical
+       film library. `tank/my_media` is phone and camera video, which is
+       overwhelmingly HDR; without tonemapping, HDR transcoded to an SDR client
+       comes out grey and washed out and looks like a broken file rather than a
+       settings problem. The tonemap_videotoolbox filter is present in the
+       bundled build, so this runs on the media engine rather than on OpenCL —
+       which is why EnableTonemapping (the generic path) stays false. -->
+  <EnableVideoToolboxTonemapping>true</EnableVideoToolboxTonemapping>
+
+  <TonemappingAlgorithm>bt2390</TonemappingAlgorithm>
+  <TonemappingMode>auto</TonemappingMode>
+  <TonemappingRange>auto</TonemappingRange>
+  <TonemappingDesat>0</TonemappingDesat>
+  <TonemappingPeak>100</TonemappingPeak>
+  <TonemappingParam>0</TonemappingParam>
+  <VppTonemappingBrightness>16</VppTonemappingBrightness>
+  <VppTonemappingContrast>1</VppTonemappingContrast>
+  <H264Crf>23</H264Crf>
+  <H265Crf>28</H265Crf>
+  <EncoderPreset xsi:nil="true" />
+  <DeinterlaceDoubleRate>false</DeinterlaceDoubleRate>
+  <DeinterlaceMethod>yadif</DeinterlaceMethod>
+  <EnableDecodingColorDepth10Hevc>true</EnableDecodingColorDepth10Hevc>
+  <EnableDecodingColorDepth10Vp9>true</EnableDecodingColorDepth10Vp9>
+  <EnableDecodingColorDepth10HevcRext>false</EnableDecodingColorDepth10HevcRext>
+  <EnableDecodingColorDepth12HevcRext>false</EnableDecodingColorDepth12HevcRext>
+  <EnableEnhancedNvdecDecoder>true</EnableEnhancedNvdecDecoder>
+  <PreferSystemNativeHwDecoder>true</PreferSystemNativeHwDecoder>
+  <EnableIntelLowPowerH264HwEncoder>false</EnableIntelLowPowerH264HwEncoder>
+  <EnableIntelLowPowerHevcHwEncoder>false</EnableIntelLowPowerHevcHwEncoder>
+  <EnableHardwareEncoding>true</EnableHardwareEncoding>
+
+  <!-- Left at the default `false`, deliberately, despite hevc_videotoolbox
+       being available. HEVC output is smaller at equal quality but a browser
+       tab is the most likely client on a tailnet and browser HEVC support is
+       patchy; a client that cannot play the output gets a failed stream instead
+       of a slightly larger one. Worth revisiting once the actual clients are
+       known. -->
+  <AllowHevcEncoding>false</AllowHevcEncoding>
+  <AllowAv1Encoding>false</AllowAv1Encoding>
+
+  <EnableSubtitleExtraction>true</EnableSubtitleExtraction>
+
+  <!-- CHANGED. Default is h264 + vc1.
+
+       vc1 REMOVED: Apple silicon's media engine has no VC-1 decoder, so leaving
+       it enabled asks VideoToolbox for something it cannot do and takes a
+       software fallback on every VC-1 file — with a hardware-accelerated
+       appearance in the settings page. VC-1 is a DVD/WMV-era codec that is
+       unlikely to appear here at all.
+
+       hevc, vp9, av1 ADDED: all three decode on the M4 Max media engine, and
+       HEVC in particular is what an iPhone records. Leaving HEVC off the list
+       would have meant software-decoding the single most common format in
+       `tank/my_media`. -->
+  <HardwareDecodingCodecs>
+    <string>h264</string>
+    <string>hevc</string>
+    <string>vp9</string>
+    <string>av1</string>
+  </HardwareDecodingCodecs>
+
+  <AllowOnDemandMetadataBasedKeyframeExtractionForExtensions>
+    <string>mkv</string>
+  </AllowOnDemandMetadataBasedKeyframeExtractionForExtensions>
+</EncodingOptions>
