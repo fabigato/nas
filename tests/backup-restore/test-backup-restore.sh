@@ -42,6 +42,20 @@ SRC_POOL=tank
 DST_POOL=${TANK_BACKUP_DST:-tankbak}
 DATASETS=${TANK_BACKUP_DATASETS:-"my_media media documents"}
 
+# Import by-serial, exactly as tank-backup.sh does, and NOT by the default search
+# path. A bare `zpool import tankbak` resolves devices through by-id — GPT UUIDs
+# — and on 2026-08-23 that failed after an ordinary unplug/replug cycle with
+# "one or more devices is currently unavailable", after burning 2m15s, while a
+# simultaneous scan reported the pool ONLINE and importable.
+#
+# This script had the bare form until 2026-09-13, which was the worst place for
+# it to survive: the verify phase runs IMMEDIATELY after an unplug and replug,
+# i.e. in precisely the state that produced that failure. The restore test would
+# have reported "could not import" — the single most alarming line it can print
+# — for a pool that was perfectly healthy. Commit 0c9dc09 taught the sync script
+# this lesson and never carried it here.
+DEV_DIR=${TANK_BACKUP_DEV_DIR:-/var/run/disk/by-serial}
+
 SCRATCH=.restoretest
 MANIFEST=/var/tmp/tank-restore-manifest.txt
 
@@ -118,9 +132,16 @@ verify)
 	# Import if needed. This is the step that proves the drive stands alone: a
 	# cold import of a pool that was exported and physically disconnected.
 	if ! "$ZPOOL" list -H -o name "$DST_POOL" >/dev/null 2>&1; then
-		echo "importing $DST_POOL"
-		"$ZPOOL" import "$DST_POOL" || {
-			bad "could not import $DST_POOL"
+		echo "importing $DST_POOL from $DEV_DIR"
+		"$ZPOOL" import -d "$DEV_DIR" "$DST_POOL" || {
+			bad "could not import $DST_POOL from $DEV_DIR"
+			# Print the WHOLE scan rather than a grep of it: the config block names
+			# the unavailable device and its state, which is the only part that
+			# explains the failure. Same reasoning as tank-backup.sh.
+			echo "       scan of $DEV_DIR follows:"
+			"$ZPOOL" import -d "$DEV_DIR" 2>&1 | sed 's/^/       /'
+			echo "       devices present in $DEV_DIR:"
+			ls "$DEV_DIR" 2>&1 | sed 's/^/       /'
 			exit 1
 		}
 	fi
