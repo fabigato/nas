@@ -21,15 +21,33 @@
 # 1. NON-RAW SEND INTO AN INDEPENDENTLY-ENCRYPTED POOL.
 #
 # `zfs send` without -w decrypts on read and sends plaintext; the destination
-# re-encrypts under ITS OWN key. So the two pools share no key material: losing
-# one does not compromise the other, and the backup can be read without the
-# source's key. The plaintext exists only in a local pipe in memory.
+# re-encrypts under ITS OWN key. So the two pools share no key MATERIAL — the
+# destination's master key is generated on the destination and never leaves it,
+# and `encryptionroot` on a received dataset reads as the destination pool. The
+# backup is therefore readable without the source's key, and the plaintext exists
+# only in a local pipe in memory.
+#
+# BE PRECISE ABOUT WHAT THAT DOES AND DOES NOT BUY, because an earlier version of
+# this comment overclaimed it. It said "losing one does not compromise the
+# other", which was true of the key material and is NOT true of the secret: as of
+# 2026-09-13 the destination is deliberately created with THE SAME PASSPHRASE as
+# `tank` (see tankbak-create.sh, DESIGN 3). One passphrase to remember, and
+# therefore one passphrase to keep recoverable — at the cost that a leaked
+# passphrase now opens both copies. Independent master keys still mean a
+# corrupted or brute-forced pool does not imply anything about the other one, and
+# that `zfs change-key` on either side does not touch the other. Independent
+# failure against a leaked secret is the part that was traded away, knowingly.
+#
+# It is a small trade here: tank's passphrase already sits in a file on an
+# internal SSD that is not yet FileVault-encrypted, so it was never the strong
+# link in the source's chain either.
 #
 # The consequence that decides whether any of this is worth anything: THE
 # DESTINATION PASSPHRASE MUST BE RECOVERABLE WITHOUT THIS MACHINE. The scenario
 # this drive exists for is the Mac being destroyed or stolen. If the only copy of
 # the passphrase lives on the Mac, the backup is unreadable in exactly the case
-# it was bought for.
+# it was bought for. Sharing the passphrase with `tank` does not relax that
+# requirement — it concentrates it into a single secret.
 #
 # 2. ITS OWN SNAPSHOTS, WITH A PREFIX THE RETENTION PRUNER CANNOT SEE.
 #
@@ -93,6 +111,12 @@
 # from is a guess — run the restore test, don't just read the exit code.
 #
 # --- USAGE ---------------------------------------------------------------
+#
+# THIS DOES NOT CREATE THE DESTINATION POOL. On a fresh drive, run
+# tankbak-create.sh first — it owns every decision that is permanent for the life
+# of the pool (ashift, cipher, encryption root, key format, key location) and
+# refuses to touch anything that is internal, virtual, or a member of an imported
+# pool. This script only ever replicates into a pool that already exists.
 #
 #   sudo sh tank-backup.sh              # sync, leave the pool imported
 #   sudo sh tank-backup.sh --export     # sync, then export for unplugging
@@ -258,6 +282,9 @@ if ! "$ZPOOL" list -H -o name "$DST_POOL" >/dev/null 2>&1; then
 		ls "$DEV_DIR" 2>&1 | sed 's/^/         /' | tee -a "$LOG"
 		log "         If the drive is plugged in and the pool shows as ONLINE above,"
 		log "         try a different search dir: zpool import -d /dev $DST_POOL"
+		log "         If the scan lists NO pool at all and this is a new drive,"
+		log "         the pool does not exist yet — this script does not create it:"
+		log "           sudo sh scripts/nas-backup/tankbak-create.sh --list"
 		exit 1
 	fi
 fi
@@ -407,13 +434,79 @@ for name in $DATASETS; do
 	esac
 	log "$dst has an interrupted receive — resuming"
 	if [ "$DRY_RUN" = 1 ]; then
-		log "  DRY RUN: would resume with zfs send -t <token> | zfs recv -s $dst"
+		log "  DRY RUN: would resume with zfs send -t <token> | zfs recv -u -s $dst"
 		continue
 	fi
-	if "$ZFS" send -t "$token" | "$ZFS" recv -s "$dst"; then
+	# A resume cannot use -F, so a destination dirtied since its last snapshot
+	# has to be rolled back by hand or the resume is rejected outright with
+	# "destination has been modified since most recent snapshot".
+	#
+	# This is not hypothetical and it is the same 2026-09-14 incident as below:
+	# the resumed dataset mounted itself, macOS spent 1h46m writing 28 MB of
+	# Spotlight and .fseventsd metadata into it, and the next run's resume was
+	# refused. Two failures from one missing flag — first the receive was
+	# blocked, then the token was invalidated.
+	#
+	# Rolling back is safe BY DEFINITION here. The destination is readonly=on
+	# and is a pure replica; anything written to it locally is either macOS
+	# noise or a mistake, and in both cases the source is authoritative. This is
+	# exactly what the -F on every other receive in this script already does. It
+	# is done explicitly rather than left to the operator because the failure
+	# surfaces hours into a run, and the recovery is two commands nobody
+	# remembers at 3am.
+	dirty=$("$ZFS" get -Hp -o value written "$dst" 2>/dev/null)
+	case "${dirty:-0}" in
+	'' | 0 | '-') ;;
+	*)
+		newest=$("$ZFS" list -H -t snapshot -d 1 -o name -s creation "$dst" 2>/dev/null | tail -1)
+		if [ -n "$newest" ]; then
+			log "  $dst has $dirty bytes written since $newest — rolling back"
+			log "  (destination is readonly=on and a pure replica, so this is noise)"
+			# Not piped through tee: a pipeline's status is the LAST command's,
+			# so `| tee` would report tee's success and hide a failed rollback —
+			# and the resume immediately below would then fail for a reason the
+			# log had just claimed was handled.
+			if run "$ZFS" rollback "$newest"; then
+				log "  rolled back to $newest"
+			else
+				log "  WARNING: rollback of $dst to $newest failed; the resume"
+				log "           below will probably be refused. Check for a"
+				log "           snapshot newer than the resume base, or a clone."
+			fi
+		else
+			log "  WARNING: $dst has $dirty bytes written but no snapshot to roll"
+			log "           back to. The resume below will probably be refused."
+		fi
+		;;
+	esac
+
+	# -u IS LOAD-BEARING AND WAS MISSING UNTIL 2026-09-14.
+	#
+	# Every other receive in this script passes -u; this one did not, and the
+	# asymmetry was invisible until a resume actually ran against real data.
+	# Without it the resumed dataset is MOUNTED the moment the receive finishes,
+	# and a mounted dataset cannot be received into — so the very next send in
+	# the same run dies with:
+	#     cannot receive incremental stream: dataset is busy
+	# Measured: the 2026-09-14 run resumed 424 GB of my_media over 1h31m, then
+	# failed its 2.4 MB follow-up incremental three seconds later for exactly
+	# this reason, while media and documents sailed through.
+	#
+	# Same failure the restore test's README already records from 2026-08-23,
+	# reached by a different route: anything that leaves the destination mounted
+	# breaks the next receive. Nothing should ever mount here.
+	if "$ZFS" send -t "$token" | "$ZFS" recv -u -s "$dst"; then
 		log "  resume completed"
 	else
-		log "FAIL: resume of $dst failed. To abandon it instead: zfs recv -A $dst"
+		log "FAIL: resume of $dst failed."
+		log "      If it said 'destination has been modified since most recent"
+		log "      snapshot', something wrote to the backup. Abandon the partial"
+		log "      and roll the destination back to its snapshot, then rerun:"
+		log "        sudo $ZFS recv -A $dst"
+		log "        sudo $ZFS rollback \$($ZFS list -H -t snapshot -d 1 -o name \\"
+		log "          -s creation $dst | tail -1)"
+		log "      Neither destroys replicated data — the snapshot holds it."
+		log "      To abandon the partial receive and nothing else: zfs recv -A $dst"
 		maybe_export
 		exit 2
 	fi
@@ -488,6 +581,27 @@ sent=0
 for name in $DATASETS; do
 	src="$SRC_POOL/$name"
 	dst="$DST_POOL/$name"
+
+	# A mounted destination cannot be received into — `zfs recv` reports
+	# "dataset is busy" and the send dies. So unmount first rather than trusting
+	# that nothing mounted it.
+	#
+	# This is belt to the -u braces on every receive above, and it is worth
+	# having both: -u stops THIS script mounting anything, while this handles a
+	# mount that arrived some other way. Both routes have actually happened —
+	# the restore test left mounts behind on 2026-08-23, and the resume path
+	# mounted my_media itself on 2026-09-14 by omitting -u. A third route is
+	# macOS auto-mounting a volume that appears while Finder is watching.
+	#
+	# Deliberately NOT a failure if the unmount does not take: the send below
+	# will fail loudly and specifically on its own, and refusing here would turn
+	# a recoverable condition into a refused run.
+	if [ "$("$ZFS" list -H -o name "$dst" 2>/dev/null)" = "$dst" ] &&
+		[ "$("$ZFS" get -H -o value mounted "$dst" 2>/dev/null)" = "yes" ]; then
+		log "$dst is mounted — unmounting before receiving into it"
+		run "$ZFS" unmount "$dst" 2>/dev/null ||
+			log "  WARNING: could not unmount $dst; the receive will likely fail"
+	fi
 
 	if ! "$ZFS" list -H -o name "$src" >/dev/null 2>&1; then
 		log "$src does not exist — skipping"
