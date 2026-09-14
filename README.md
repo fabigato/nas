@@ -360,12 +360,39 @@ can report the mount's state rather than the stored property.** Always check
 source of `on` means the property is fine and only the live mount is writable.
 Reading the value alone will convince you the backup is exposed when it isn't.
 
-**Known limit:** `recv -F` makes the destination mirror the source's snapshot
-history rather than exceed it. Delete a file, let retention prune the snapshot
-holding it, then sync, and both copies are gone. Deep retention on the
-irreplaceable dataset is what keeps that window wide. This is the cost of the
-sync being a true sync rather than an archive, and it is the reason the retention
-depth on `my_media` is the number it is.
+### Known limit: the backup is a current-state mirror, not an archive
+
+**No retention snapshot has ever crossed to the destination, and none ever
+will.** This section previously claimed the destination "mirrors the source's
+snapshot history". It does not, and the difference matters in exactly the
+scenario the drive exists for.
+
+The mechanism: a full send is `zfs send <dataset>@sync-<stamp>` — one snapshot —
+and an incremental is `send -i`, which carries the delta between two snapshots
+and no intermediate ones. `-I` would include them and `-R` would too; neither is
+used. So the destination holds only the last `KEEP_SYNC` (2) `sync-` snapshots,
+and no `auto-weekly` or `auto-monthly` tier appears there at all.
+
+Those two `sync-` snapshots are not history either. They exist so the older one
+is a fallback incremental base if the newest receive turns out to be partial —
+a replication mechanism, not a restore point.
+
+Measured on 2026-09-14: `tank` used 1.23 TB, `tankbak` 864 GB. The gap was
+397 GB of `my_media` held only by `@auto-weekly-2026-09-07-020002`. In that
+instance the bytes had been moved to `media` and were already replicated under
+their new home, so nothing was exposed — but the general case is not so lucky.
+
+**If `tank` is destroyed you recover the last synced state, and every earlier
+version goes with the pool.** Deep retention on `my_media` protects against a
+mistaken `rm` while `tank` is alive; it does nothing for the offsite copy.
+Snapshots and backups cover different failures, and this is the seam between
+them.
+
+Accepted deliberately on 2026-09-14 rather than fixed. Closing it means either
+`send -I` to carry intermediate snapshots forward — which needs a retention
+policy on the destination that does not exist — or re-sending full history, an
+821 GB transfer for `my_media` alone. Neither buys much against the failures
+this drive is actually for: enclosure death, theft, fire.
 
 ### The first destination pool, and how it was lost
 

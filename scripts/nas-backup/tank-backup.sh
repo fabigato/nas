@@ -97,15 +97,35 @@
 #
 # --- WHAT THIS DOES NOT DO -----------------------------------------------
 #
-# The destination's snapshot history MIRRORS the source's; it does not exceed it.
-# `recv -F` rolls the destination forward to match, so a snapshot pruned on
-# `tank` goes away here too at the next sync. That leaves one gap, stated so it
-# is not mistaken for covered: delete a file, let retention prune the snapshot
-# holding it, THEN sync, and both copies have followed you off the cliff.
-# Closing it means keeping deeper history on the destination than the source,
-# which is a bigger change than a flag. The mitigation for now is that
-# `my_media` retention is deep (8 weekly + 6 monthly) precisely so that window
-# is months wide.
+# IT DOES NOT BACK UP SNAPSHOT HISTORY. THE DESTINATION IS A CURRENT-STATE
+# MIRROR, NOT AN ARCHIVE.
+#
+# This comment used to claim the destination's history "MIRRORS the source's".
+# It does not, and the correction matters in exactly the scenario the drive
+# exists for. A full send here is `zfs send <ds>@sync-<stamp>` — a single
+# snapshot — and an incremental is `send -i`, which carries the delta between
+# two snapshots and NO intermediate ones. `-I` would include them, `-R` would
+# too; neither is used. So no `auto-weekly` or `auto-monthly` snapshot has ever
+# reached the destination, and none will.
+#
+# The KEEP_SYNC `sync-` snapshots that do land there are not history either:
+# the older one exists as a fallback incremental base if the newest receive
+# turns out to be partial. That is a replication mechanism, not a restore point.
+#
+# Measured 2026-09-14: tank used 1.23T, tankbak 864G. The 397G gap was my_media
+# blocks held only by @auto-weekly-2026-09-07-020002 — bytes that had been moved
+# to `media` and so were already replicated under their new home. The general
+# case is not so lucky.
+#
+# So: lose `tank` and you recover the last synced state, with every earlier
+# version gone. Deep retention on my_media protects against a mistaken `rm`
+# while tank is alive and does nothing for the offsite copy. Snapshots and
+# backups cover different failures; this is the seam between them.
+#
+# Accepted deliberately on 2026-09-14 rather than closed. Closing it means
+# `send -I` plus a destination-side retention policy that does not exist, or
+# re-sending full history — 821G for my_media alone. Neither buys much against
+# enclosure death, theft or fire, which is what this drive is for.
 #
 # It also does not verify the restored data. A backup you have never restored
 # from is a guess — run the restore test, don't just read the exit code.

@@ -89,8 +89,10 @@ it usable for a restore onto a rebuilt pool later.
   redundancy, so ZFS can detect corruption there but cannot repair it. A scrub of
   the destination while it is attached is the check for that, and it is not part
   of this test.
-- **The deletion-then-sync gap.** `recv -F` makes the destination mirror the
-  source's history rather than exceed it, so deleting a file, letting retention
-  prune the snapshot holding it, and then syncing loses both copies. The
-  `cleanup` phase is a chance to watch that mechanism work on data you don't
-  care about.
+- **The deletion-then-sync gap.** The destination is a current-state mirror and
+  holds no retention history at all — only the last two `sync-` snapshots, since
+  sends are per-snapshot with `-i` rather than `-I`. So deleting a file and
+  syncing loses it from the backup, and no earlier version is there to fall back
+  on. The `cleanup` phase is a chance to watch that happen on data you don't
+  care about. See the main README's "Known limit" section, which corrects an
+  earlier claim that the destination mirrored the source's snapshot history.
