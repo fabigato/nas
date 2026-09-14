@@ -19,7 +19,7 @@ Everything here assumes the OpenZFS-on-macOS fork with binaries in
 | `scripts/nas-boot-unlock/` | Imports and unlocks `tank` at boot |
 | `scripts/nas-scrub/` | Monthly scrub, with guards and Discord alerting |
 | `scripts/nas-snapshot/` | Daily snapshots with tiered retention |
-| `scripts/nas-backup/` | Replication to an offline, independently-encrypted pool |
+| `scripts/nas-backup/` | Creating the offline backup pool, and replicating to it |
 | `scripts/nas-jellyfin/` | The media server the pool exists to serve |
 | `tests/` | Test harnesses — see [Tests](#tests) |
 
@@ -28,15 +28,21 @@ This README is the map; the headers are the detail.
 
 ## The pool
 
-Three datasets, all inheriting `compression=lz4`, `atime=off`, `xattr=sa` and
-`dnodesize=auto` from the pool root. The root itself is `canmount=off` — it
-exists to hold properties the children inherit, and holds no data.
+Three datasets, all inheriting `atime=off`, `xattr=sa` and `dnodesize=auto` from
+the pool root, which also hands down `compression=lz4`. The root itself is
+`canmount=off` — it exists to hold properties the children inherit, and holds no
+data.
 
-| Dataset | recordsize | Purpose | Snapshot retention |
-| --- | --- | --- | --- |
-| `tank/my_media` | 1M | Irreplaceable photos and video | 8 weekly + 6 monthly |
-| `tank/media` | 1M | Re-downloadable media | 2 weekly |
-| `tank/documents` | 128K | Small mixed files | 7 daily + 4 weekly + 6 monthly |
+| Dataset | recordsize | compression | Purpose | Snapshot retention |
+| --- | --- | --- | --- | --- |
+| `tank/my_media` | 1M | lz4 | Irreplaceable photos and video | 8 weekly + 6 monthly |
+| `tank/media` | 1M | lz4 | Re-downloadable media | 2 weekly |
+| `tank/documents` | 128K | **zstd** | Small mixed files | 7 daily + 4 weekly + 6 monthly |
+
+`documents` is the one dataset that overrides compression, and it is the only one
+where the override pays: zstd costs more CPU per block than lz4 and buys a real
+ratio on text, which is what is in there. On the two media datasets the bytes are
+already-compressed video, so zstd would spend the CPU and return nothing.
 
 **The layout is organised by replaceability, and that is the whole design.** It
 is what decides retention depth, and it is also what decides offsite priority.
@@ -137,7 +143,7 @@ operation failed, `3` a configured dataset does not exist.
 Retention is configured at the bottom of the script as one line per dataset —
 keep counts per tier, `0` to disable a tier.
 
-## The offline backup — `tank-backup.sh`
+## The offline backup — `tankbak-create.sh`, then `tank-backup.sh`
 
 **Not a daemon, and there is no plist.** The destination drive is meant to be
 disconnected, which is the whole point: a backup that is always attached is an
@@ -146,6 +152,155 @@ same power event as the original. So this runs by hand, attended, when the drive
 is plugged in — which is also what lets the destination pool use
 `keylocation=prompt` and keep no key on disk at all.
 
+### A spare bay in the Orico is fine — the care is at removal
+
+Both `tank` members hang off the same USB port. `diskutil info -plist` reports an
+identical `DeviceTreePath` for each, because the enclosure presents two LUNs
+behind one bridge:
+
+```
+IODeviceTree:/arm-io@.../pcie-xhci-ss-port1@08100000/usb3-hub-port3@08130000
+```
+
+**That does not disqualify a spare bay, and an earlier version of this section
+said it did.** The wrong reasoning is worth recording because it was persuasive:
+it borrowed the "a backup that is always attached is an online second copy"
+argument, which is about a drive that *lives* in the enclosure, and applied it to
+one that sits in a bay for the length of a sync and in a drawer the rest of the
+month. It also cited `tests/2026-08-17-drive-pull/` — but that test pulled an
+**in-use mirror member of an imported pool**, and extending it to an exported
+non-member was an extrapolation, not evidence.
+
+On the ZFS question there is nothing to worry about: the drive joins no vdev,
+`tank`'s topology is unchanged, and `zpool create` touches only the device named.
+
+**The real consequence is at removal.** A device-removal event can make a
+single-bridge enclosure re-enumerate, and if that drops `tank`'s LUNs too then
+`tank` suspends — `failmode=wait`, so Jellyfin blocks in an ioctl `SIGKILL`
+cannot free. Recoverable, not dangerous. Two ways to handle it:
+
+```sh
+# A — pull it and repair if needed. Try this first.
+sudo sh scripts/nas-backup/tank-backup.sh --export
+# remove the backup drive
+sudo /usr/local/zfs/bin/zpool clear tank      # ONLY if tank suspended
+
+# B — no risk, more steps. Switch to this if A ever disturbs tank.
+sudo sh scripts/nas-backup/tank-backup.sh --export
+sudo launchctl bootout system/local.jellyfin
+sudo /usr/local/zfs/bin/zpool export tank
+# power the enclosure off, remove the drive, power it on
+sudo launchctl bootstrap system /Library/LaunchDaemons/local.jellyfin.plist
+```
+
+In B, `tank` returns on its own: `tank-boot-unlock.sh`'s `WatchPaths` fires when
+the disks reappear, which is exactly what it was added for.
+
+The argument for a separate dock is therefore **ergonomics, not safety** — one
+USB cable means unplugging is a single motion rather than a procedure. Worth
+knowing, not worth blocking on. `tankbak-create.sh` reports which case you are in
+and prints the matching removal steps; it does not refuse either.
+
+### Creating the pool — `tankbak-create.sh`
+
+`tank-backup.sh` replicates into a pool that already exists; it does not create
+one. Creation is its own script because **every decision it makes is permanent
+for the life of the pool** — `ashift`, the cipher, the encryption root, the key
+format, the key location. None of those is a property edit later; getting one
+wrong means destroying the pool and re-sending every byte over USB.
+
+```sh
+sudo sh scripts/nas-backup/tankbak-create.sh --list              # eligible targets
+sudo sh scripts/nas-backup/tankbak-create.sh --dry-run <serial>  # print the plan
+sudo sh scripts/nas-backup/tankbak-create.sh <serial>            # create it
+sudo sh scripts/nas-backup/tankbak-create.sh --key-from-tank <serial>
+```
+
+Exit codes: `0` created, `1` refused, `2` created but a post-create check failed.
+
+**It is mostly refusals, and it is the only script here that can destroy data
+that isn't its own.** The target is named explicitly by serial and typed back to
+confirm — there is no auto-detect, because "the external drive that isn't part of
+`tank`" is also the description of somebody's Time Machine disk on the one day it
+happens to be plugged in. It then refuses a target that is internal, virtual, a
+member of an imported pool, or smaller than `tank`'s allocated bytes. Sharing
+`tank`'s enclosure is reported rather than refused, per above.
+
+Two of those guards are less obvious than they look. **Internal** is checked
+instead of trying to identify the boot disk, because on APFS that means chasing
+a synthesized container back to its physical store — `/` reports `disk3` while
+the data is on `disk0`, so the obvious check passes while proving nothing.
+**Virtual** blocks a leftover 8 TB disk image that has been attached to this
+machine since the pool build and reports its media name as `tank`.
+
+Afterwards it reads back the properties that cannot be changed later, asserts
+`feature@large_blocks` is on — without it the 1M records from both media datasets
+will not send, which would surface as a refused stream hours in — and then does
+the one check nothing else can do, described next.
+
+### Encryption: independent key, shared passphrase
+
+**Non-raw `zfs send`, into a pool with its own encryption root.** Raw send (`-w`)
+of encrypted datasets is the historically buggiest corner of native ZFS
+encryption; non-raw sidesteps that path, and since both ends are the same machine
+on the same build there is no version skew to worry about. It would also mean
+`zfs change-key` on `tank` breaking every future incremental. The destination
+re-encrypts under its own key, so the two pools share no key *material* —
+`encryptionroot` on a received dataset reads as the destination pool, not the
+source.
+
+**The passphrase, however, is deliberately the same one `tank` uses.** One secret
+to remember, and therefore one secret to keep recoverable. Be precise about the
+cost rather than repeating that the pools are "independent": independent master
+keys mean `change-key` on one side doesn't touch the other, and that a corrupted
+or brute-forced pool implies nothing about its counterpart. They do **not** mean
+independent failure against a leaked passphrase. That is the part traded away,
+knowingly — and it is a small trade, because `tank`'s passphrase already sits in
+a file on an internal SSD that is not yet FileVault-encrypted, so it was never
+the strong link in the source's chain either.
+
+`keylocation=prompt`, though, and *not* `tank`'s keyfile. `tank` keeps a key on
+disk because it has to — a pool that must return after an unattended reboot
+cannot prompt. This pool has the opposite requirement, so nothing on the Mac
+unlocks it and stealing the Mac does not hand over the backup. The consequence is
+the feature: this pool **cannot** be synced unattended.
+
+**`zpool create` asks for the passphrase twice, so it catches a typo — it cannot
+catch you confidently typing a *different* passphrase twice.** The pool would be
+fine, importable, and locked behind a secret nobody wrote down, and you would
+find out at the restore. So after creating, `tankbak-create.sh` unloads the key
+and reloads it with `-L` pointed at `tank`'s keyfile, which overrides the locator
+for one invocation without touching the stored property. If that load succeeds,
+the passphrase provably matches `tank`'s.
+
+Note that `tank` itself is `keyformat=passphrase` with
+`keylocation=file:///etc/zfs/keys/tank.key` — the two properties are
+independent, which is a standing source of confusion. The key material *is* a
+passphrase; it simply lives in a file rather than being typed, because a pool
+that must return after an unattended reboot cannot prompt. Whatever is in that
+file is the passphrase.
+
+**`--key-from-tank` is the safer route when that passphrase is a long random
+string.** It creates the pool with `keylocation` pointed at `tank`'s key file, so
+the passphrase is read rather than retyped, then immediately sets
+`keylocation=prompt`. `keyformat` is immutable but `keylocation` is not, so the
+end state is identical to having typed it — and the passphrase matches `tank`'s
+by construction rather than by luck. The flip is treated as a hard failure if it
+does not take, because a backup pool still pointing at `tank`'s key file would
+keep working silently while quietly negating the paragraph above.
+
+What the flag skips is the rehearsal — you never prove you can reproduce the
+passphrase by hand. Do that in the restore test, which prompts for it anyway and
+is the right place for that failure to surface.
+
+The consequence that decides whether the backup is worth anything: **the
+destination passphrase must be recoverable without the source machine.** The
+scenario an offsite drive exists for is that machine being destroyed or stolen.
+Sharing the passphrase with `tank` does not relax that requirement — it
+concentrates it into a single secret.
+
+### Syncing — `tank-backup.sh`
+
 ```sh
 sudo sh scripts/nas-backup/tank-backup.sh --dry-run   # decide, change nothing
 sudo sh scripts/nas-backup/tank-backup.sh --export    # sync, then export
@@ -153,17 +308,11 @@ sudo sh scripts/nas-backup/tank-backup.sh --export    # sync, then export
 
 Exit codes: `0` synced, `1` refused, `2` a send/receive failed, `3` nothing to do.
 
-**Non-raw `zfs send`, into a pool with its own encryption key.** Raw send (`-w`)
-of encrypted datasets is the historically buggiest corner of native ZFS
-encryption; non-raw sidesteps that path, and since both ends are the same machine
-on the same build there is no version skew to worry about. The destination
-re-encrypts under its own key, so the two pools share no key material —
-`encryptionroot` on a received dataset reads as the destination pool, not the
-source.
-
-The consequence that decides whether the backup is worth anything: **the
-destination passphrase must be recoverable without the source machine.** The
-scenario an offsite drive exists for is that machine being destroyed or stolen.
+**This is a true sync, not an accumulating archive.** New files appear on the
+destination, deleted files disappear from it: `recv -F` rolls the destination
+forward to match the source exactly rather than keeping what the source no longer
+has. That is the intended behaviour, and its flip side is the known limit at the
+end of this section.
 
 **It takes its own `sync-` prefixed snapshots** rather than reusing the retention
 tiers, because there is no single pool-wide name to use as a base — the snapshot
@@ -190,6 +339,21 @@ property is read back afterwards, on every run including one that finds nothing
 to send. Nothing should be mounted there in normal operation — `recv -u` leaves
 them alone — so a mount means something else left one behind.
 
+**A mounted destination cannot be received into**, and that single fact has now
+caused two separate failures. `zfs recv` reports `dataset is busy` and the send
+dies. Two defences, because the mount has arrived by two different routes:
+
+- **Every receive passes `-u`.** The resume path did not until 2026-09-14, and
+  the asymmetry was invisible until a resume ran against real data: the run
+  resumed 424 GB of `my_media` over 1h31m, mounted it on completion, then failed
+  its 2.4 MB follow-up incremental three seconds later, while `media` and
+  `documents` sailed through. One missing flag, three hours in.
+- **Each destination dataset is unmounted before it is received into.** This
+  covers a mount that arrived some other way — the restore test left some behind
+  on 2026-08-23, and macOS will happily auto-mount a volume that appears while
+  Finder is watching. It warns rather than refusing, since the receive below
+  fails loudly and more specifically on its own.
+
 Worth knowing if you ever debug this: **`zfs get readonly` on a *mounted* dataset
 can report the mount's state rather than the stored property.** Always check
 `zfs get -o all readonly <dataset>` and look at the `source` column; a `local`
@@ -199,7 +363,43 @@ Reading the value alone will convince you the backup is exposed when it isn't.
 **Known limit:** `recv -F` makes the destination mirror the source's snapshot
 history rather than exceed it. Delete a file, let retention prune the snapshot
 holding it, then sync, and both copies are gone. Deep retention on the
-irreplaceable dataset is what keeps that window wide.
+irreplaceable dataset is what keeps that window wide. This is the cost of the
+sync being a true sync rather than an archive, and it is the reason the retention
+depth on `my_media` is the number it is.
+
+### The first destination pool, and how it was lost
+
+Worth reading before trusting the second one, because the cause was us and not
+the hardware.
+
+The first `tankbak` lived on a small stand-in device, `STORAGE_DEVICE-7423J07`.
+It was created, synced three times and restore-tested clean on 2026-08-23. By
+00:18 the next morning it was unimportable:
+
+```
+pool: tankbak   state: FAULTED
+status: The pool metadata is corrupted.
+```
+
+The timeline is the explanation. The last good sync finished 23:18:52 and the
+drive was unplugged before 23:41 — and at that point `tank-backup.sh` only
+honoured `--export` on its happy path. Five exit paths, including the ordinary
+nothing-to-send one, returned with the pool still **imported**. So the drive was
+almost certainly pulled while ZFS held it, which is the drive-pull test performed
+by accident. Commit `55adeb1` closed that hole; `maybe_export` is now called on
+every exit path that got far enough to import.
+
+Two standing rules follow:
+
+- **Always `--export`, and wait for it to return, before unplugging.** It is the
+  one operational rule this pool's survival depends on. A partial receive
+  survives an export — ZFS is transactional and the resume token is durable — so
+  there is never a reason to skip it for convenience.
+- **Scrub the destination after the first full send, and periodically after.** A
+  single-drive pool has no redundancy, so ZFS can detect corruption there but
+  never repair it. Finding out the drive is bad while `tank` still holds the only
+  good copy is the entire value of the check. It is not part of the restore test
+  and there is no daemon for it: `sudo /usr/local/zfs/bin/zpool scrub tankbak`.
 
 ## Jellyfin — `local.jellyfin`
 
