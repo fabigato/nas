@@ -797,15 +797,39 @@ if [ -n "$RAN" ] && [ "$DRY_RUN" = 0 ]; then
 	# NOT `restic check | sed`: a pipeline's status is the LAST command's, and
 	# sed always succeeds, so a failing check would be logged as clean. Same
 	# bug bootstrap-offsite.sh had on `restic init`.
-	CHECK_OUT=$("$RESTIC" check 2>&1)
+	# --retry-lock, because the default is NO retries and that bit on
+	# 2026-10-03: check wants an EXCLUSIVE lock, while backup and restore take
+	# shared ones. A shared lock left behind by one of this run's own restore
+	# calls is invisible to every later backup and restore and stops check
+	# dead — "repo already locked, waiting up to 0s for the lock".
+	CHECK_OUT=$("$RESTIC" check --retry-lock 5m 2>&1)
 	CHECK_RC=$?
-	printf '%s\n' "$CHECK_OUT" | sed 's/^/    /' >>"$LOG"
+	printf '%s\n' "$CHECK_OUT" | grep -v '^[[:space:]]*$' | sed 's/^/    /' >>"$LOG"
 	if [ "$CHECK_RC" = 0 ]; then
 		log "  restic check: clean"
 	else
-		alert "restic check reported problems after a successful backup." \
-			"The upload worked; the repository's own bookkeeping does not agree.
-See $LOG."
+		case "$CHECK_OUT" in
+		*"already locked"*)
+			# Say what this is. The old wording here was "the repository's own
+			# bookkeeping does not agree", which describes CORRUPTION — the
+			# single most alarming thing this daemon can report — for what is
+			# actually a leftover lock file. The backup itself succeeded and
+			# nothing about the data is in question.
+			alert "restic check could not run: the repository is still locked." \
+				"This is lock contention, NOT a corruption finding. The backup
+succeeded and the data is not in question; check simply never ran.
+
+If no restic process is alive, clear the stale lock by hand:
+  sudo $RESTIC unlock
+Then re-run. Deliberately not scripted — an automatic unlock would defeat
+the thing that stops two runs writing at once."
+			;;
+		*)
+			alert "restic check reported problems after a successful backup." \
+				"The upload worked; the repository's own bookkeeping does not
+agree. See $LOG."
+			;;
+		esac
 		FAILED="$FAILED check"
 	fi
 fi
