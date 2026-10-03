@@ -121,6 +121,9 @@ set -u
 ZFS=${TANK_OFFSITE_ZFS:-/usr/local/zfs/bin/zfs}
 ZPOOL=${TANK_OFFSITE_ZPOOL:-/usr/local/zfs/bin/zpool}
 RESTIC=${TANK_OFFSITE_RESTIC:-/opt/homebrew/bin/restic}
+# Only used for the storage-class invariant below. restic cannot report an
+# object's storage class, so this is the one thing that needs the AWS CLI.
+AWS_CLI=${TANK_OFFSITE_AWS:-/opt/homebrew/bin/aws}
 
 POOL=${TANK_OFFSITE_POOL:-tank}
 MOUNT_ROOT=${TANK_OFFSITE_MOUNT_ROOT:-/Volumes/tank}
@@ -350,6 +353,7 @@ fi
 [ -f "$CONF_DIR/repo.pass" ] || die "$CONF_DIR/repo.pass missing — run bootstrap-offsite.sh first"
 [ -f "$CONF_DIR/backup.env" ] || die "$CONF_DIR/backup.env missing — run bootstrap-offsite.sh first"
 
+BUCKET=$(awk -F= '/^OFFSITE_BUCKET=/ { print $2; exit }' "$CONF_DIR/env")
 RESTIC_REPOSITORY=$(awk -F= '/^RESTIC_REPOSITORY=/ { print $2; exit }' "$CONF_DIR/env")
 [ -n "$RESTIC_REPOSITORY" ] || die "no RESTIC_REPOSITORY in $CONF_DIR/env"
 AWS_ACCESS_KEY_ID=$(awk -F= '/^AWS_ACCESS_KEY_ID=/ { print $2; exit }' "$CONF_DIR/backup.env")
@@ -812,6 +816,75 @@ test before relying on it. Details in $LOG."
 done <"$TABLE"
 rm -f "$TABLE"
 
+# --------------------------------------------- storage-class invariant
+
+# restic must read config, keys/, index/, snapshots/ and locks/ on EVERY run.
+# The lifecycle rule is scoped to data/ exactly so they stay in Standard.
+#
+# But a lifecycle rule is a thing a person can edit, and the failure a wrong
+# one produces is the worst shape available: the repository simply stops
+# opening, WEEKS after the change, with nothing in between to connect cause to
+# effect. You would be debugging restic while the actual mistake was a console
+# click from the previous month.
+#
+# This began as a diary entry — "~8 October: confirm data/ actually moved" —
+# which answers the question once, on one day, if someone remembers. As an
+# invariant it answers it every night, including the night in 2029 after
+# someone tidies up the bucket.
+#
+# Returns 0 healthy, 1 violated, 2 could not check.
+check_storage_classes() {
+	[ -n "$BUCKET" ] || {
+		log "  storage-class check: no OFFSITE_BUCKET in $CONF_DIR/env — SKIPPED"
+		return 2
+	}
+	[ -x "$AWS_CLI" ] || {
+		log "  storage-class check: $AWS_CLI not found — SKIPPED"
+		return 2
+	}
+
+	csc_bad=''
+	for csc_pfx in config keys/ index/ snapshots/ locks/; do
+		csc_out=$("$AWS_CLI" s3api list-objects-v2 --bucket "$BUCKET" \
+			--prefix "$csc_pfx" \
+			--query 'Contents[?StorageClass!=`STANDARD`].[Key,StorageClass]' \
+			--output text 2>/dev/null)
+		[ -n "$csc_out" ] && csc_bad="$csc_bad$csc_out
+"
+	done
+
+	if [ -n "$csc_bad" ]; then
+		alert "restic METADATA has left Standard storage — the repository will stop opening." \
+			"The lifecycle rule must transition data/ ONLY. Something now matches
+more than that, and restic cannot read an archived object at all.
+
+$(printf '%s' "$csc_bad" | head -10)
+
+Fix the rule, then restore these objects to Standard. Until both are done
+no backup can run and no restore can start.
+
+  aws s3api get-bucket-lifecycle-configuration --bucket $BUCKET"
+		return 1
+	fi
+
+	# Not an assertion — data/ is SUPPOSED to go cold, and anything under 7
+	# days old legitimately has not yet, so there is no threshold worth
+	# alerting on. Logged so the transition is visible without anyone being
+	# asked to go and look.
+	csc_dist=$("$AWS_CLI" s3api list-objects-v2 --bucket "$BUCKET" --prefix data/ \
+		--query 'Contents[].StorageClass' --output text 2>/dev/null |
+		tr '\t' '\n' | sort | uniq -c | tr -s ' ' | tr '\n' ' ')
+	log "  storage classes OK: metadata all STANDARD; data/ —${csc_dist:- empty}"
+	return 0
+}
+
+SCLASS=ok
+check_storage_classes
+case $? in
+1) SCLASS=VIOLATED; FAILED="$FAILED storage-class" ;;
+2) SCLASS=skipped ;;
+esac
+
 # --------------------------------------------------------------------- check
 
 # Metadata-only. This validates that the bookkeeping is self-consistent and
@@ -861,7 +934,7 @@ fi
 
 # ----------------------------------------------------------------- epilogue
 
-SUMMARY="ran:[${RAN:-none}] warned:[${WARNED:-none}] failed:[${FAILED:-none}] not-due:[${SKIPPED:-none}]"
+SUMMARY="ran:[${RAN:-none}] warned:[${WARNED:-none}] failed:[${FAILED:-none}] not-due:[${SKIPPED:-none}] storage-class:[$SCLASS]"
 log "  $SUMMARY"
 echo "$(date '+%Y-%m-%d %H:%M:%S') $SUMMARY" >"$LAST"
 

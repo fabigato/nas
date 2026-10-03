@@ -52,7 +52,12 @@ trap 'rm -rf "$T"' EXIT
 STUB_HEALTH=ONLINE
 STUB_SCAN=
 STUB_MOUNTED=yes
-reset_stubs() { STUB_HEALTH=ONLINE; STUB_SCAN=; STUB_MOUNTED=yes; }
+STUB_SCLASS_BAD=
+STUB_AWS=
+reset_stubs() {
+	STUB_HEALTH=ONLINE; STUB_SCAN=; STUB_MOUNTED=yes
+	STUB_SCLASS_BAD=; STUB_AWS=
+}
 
 PASS=0
 FAIL=0
@@ -107,7 +112,27 @@ echo "${STUB_MOUNTED:-yes}"
 exit 0
 STUB
 
-chmod +x "$T/bin/zpool" "$T/bin/zfs"
+# --- stub aws: healthy unless STUB_SCLASS_BAD is set ---
+cat >"$T/bin/aws" <<'STUB'
+#!/bin/sh
+prev=; pfx=
+for a in "$@"; do
+	[ "$prev" = --prefix ] && pfx=$a
+	prev=$a
+done
+case "$pfx" in
+data/)
+	# what a half-transitioned repository looks like: older packs cold,
+	# the last week still warm
+	printf 'DEEP_ARCHIVE\tDEEP_ARCHIVE\tDEEP_ARCHIVE\tSTANDARD\n' ;;
+*)
+	# metadata. Empty = all STANDARD = healthy.
+	[ -n "${STUB_SCLASS_BAD:-}" ] && printf 'index/9f2a1c\tDEEP_ARCHIVE\n' ;;
+esac
+exit 0
+STUB
+
+chmod +x "$T/bin/zpool" "$T/bin/zfs" "$T/bin/aws"
 
 # An EMPTY zed.rc, so notify() takes its "no channel set" branch and logs
 # instead of posting. Pointing a test suite at the live Discord webhook would
@@ -127,6 +152,7 @@ media/concerts   30
 EOF
 
 cat >"$T/conf/env" <<EOF
+OFFSITE_BUCKET=tank-offsite-smoketest
 RESTIC_REPOSITORY=$T/repo
 EOF
 
@@ -148,6 +174,8 @@ run_offsite() {
 		TANK_OFFSITE_HEARTBEAT="$T/heartbeat" \
 		TANK_OFFSITE_ZEDRC="$T/conf/zed.rc" \
 		TANK_OFFSITE_LOCKDIR="$T/lock" \
+		TANK_OFFSITE_AWS="${STUB_AWS:-$T/bin/aws}" \
+		STUB_SCLASS_BAD="${STUB_SCLASS_BAD:-}" \
 		TANK_OFFSITE_LIMIT_UP=0 \
 		STUB_HEALTH="$STUB_HEALTH" \
 		STUB_SCAN="$STUB_SCAN" \
@@ -451,6 +479,38 @@ run_offsite --only documents; rc=$?
 check "exit code" "$rc" 0
 grep -q 'documents: not due' "$T/log" && ok "not due, so the loop really is broken" || bad "not due, so the loop really is broken"
 chmod 644 "$T/mnt/documents/unreadable.txt"
+
+echo
+echo "19. Metadata staying in Standard is asserted every run"
+reset_stubs
+: >"$T/log"
+run_offsite --force --only documents; rc=$?
+check "exit code" "$rc" 0
+grep -q 'storage classes OK' "$T/log" && ok "asserted metadata is all STANDARD" || bad "asserted metadata is all STANDARD"
+grep -q 'storage-class:\[ok\]' "$T/log" && ok "verdict carries the result" || bad "verdict carries the result"
+# The data/ distribution is an observation, not an assertion: packs under 7
+# days old are legitimately still warm, so there is no threshold to alert on.
+grep -q 'DEEP_ARCHIVE' "$T/log" && ok "logs the data/ distribution" || bad "logs the data/ distribution"
+
+echo
+echo "20. Metadata going cold must alert — restic could not open the repo at all"
+reset_stubs
+STUB_SCLASS_BAD=1
+: >"$T/log"
+run_offsite --force --only documents; rc=$?
+check "exit code reports the violation" "$rc" 2
+grep -q 'METADATA has left Standard' "$T/log" && ok "alert names the failure" || bad "alert names the failure"
+grep -q 'storage-class:\[VIOLATED\]' "$T/log" && ok "verdict carries the violation" || bad "verdict carries the violation"
+
+echo
+echo "21. A missing aws CLI is reported, not silently skipped"
+reset_stubs
+STUB_AWS=/nonexistent/aws
+: >"$T/log"
+run_offsite --force --only documents; rc=$?
+check "exit code unaffected" "$rc" 0
+grep -q 'storage-class check: .* not found — SKIPPED' "$T/log" && ok "says it could not check" || bad "says it could not check"
+grep -q 'storage-class:\[skipped\]' "$T/log" && ok "skip is visible in the verdict, not silent" || bad "skip is visible in the verdict, not silent"
 
 echo
 echo "================================================"
