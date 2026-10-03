@@ -1,3 +1,9 @@
+# Secrets staged by bootstrap-offsite.sh before `sudo install` puts them in
+# /etc/tank-offsite. repo.pass is the restic repository password and backup.env
+# holds a live AWS secret key — neither may ever reach a commit. Ignored by
+# directory rather than by filename so a new staged file is covered by default.
+scripts/nas-offsite/staged/
+
 # macOS
 .DS_Store
 .DS_Store?

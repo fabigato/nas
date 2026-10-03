@@ -1,0 +1,30 @@
+# /etc/tank-offsite/targets — what gets backed up off-site, and how often.
+#
+#   <path relative to /Volumes/tank>   <interval in days>
+#
+# Blank lines and # comments are ignored. Paths must be relative and must not
+# contain "..". A syntax error refuses the whole run, because a table that does
+# not parse cannot be trusted. A path that is merely MISSING takes out only its
+# own target and alerts — the others still get backed up.
+#
+# After editing:  sudo install -o root -g wheel -m 644 targets.sample \
+#                   /etc/tank-offsite/targets
+# There is nothing secret in here, hence 644 rather than 600.
+
+# Irreplaceable, edited maybe twice a year. A decade to accumulate.
+my_media        30
+
+# Small but the only dataset with real churn, so a coarser cadence than this
+# loses work. Costs fractions of a cent at 1-2 GB.
+documents        7
+
+# Chosen folders inside `media`. The dataset as a whole is re-downloadable and
+# deliberately has no offsite priority, which is why my_media was split off it
+# in the first place — but individual folders in there can still matter, and
+# this is how you say so without dragging in the other 447 GB.
+#
+# Add lines as you decide more folders are worth keeping. Each one is its own
+# restic path, so `forget --group-by paths` gives it independent retention.
+#
+# media/concerts   30
+# media/home-video 30

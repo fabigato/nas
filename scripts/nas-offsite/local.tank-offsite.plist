@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.tank-offsite</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/tank-offsite.sh</string>
+	</array>
+
+	<!-- DAILY, 01:30. One job for two cadences, same reasoning as
+	     local.tank-snapshot: there is no Day key and no second plist, because
+	     launchd runs a missed StartCalendarInterval job once at the next wake.
+	     A `Day 1` monthly trigger that misses its window is silently skipped
+	     for a MONTH — on the copy of last resort. So the script decides
+	     due-ness from the age of the last successful run per dataset, and this
+	     calendar only has to fire often enough to notice. See DESIGN 1.
+
+	     01:30 and not later: the user asked for "after 1am", and it puts the
+	     run ahead of local.tank-snapshot at 02:00 rather than on top of it.
+	     Ahead is the better side of that fence — an offsite run can take hours
+	     when there is real data to send, so starting it at 02:30 would push a
+	     big month deep into the morning for no reason.
+
+	     It does NOT need to dodge the monthly scrub (1st, 03:00, 10-20 hours).
+	     The script asks `zpool status` and defers with exit 3 while any scan is
+	     in progress, which is strictly better than picking a day: it also
+	     covers a resilver, a hand-started scrub, and a scrub that overran into
+	     a second day. Deferring is free because due-ness is age-based.
+
+	     Duration is unbounded by design. A quiet month is under a minute: open
+	     the repository, see nothing changed, exit. A month where 50 GB of video
+	     was re-encoded is ~6 hours at the throttled upload rate. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>1</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+
+	<!-- Explicitly false, same as the other two daemons. The script is
+	     idempotent and a load-triggered run would correctly find nothing due,
+	     but every reboot and every reinstall would then add a no-op run to the
+	     log. That noise is how a real failure gets missed. -->
+	<key>RunAtLoad</key>
+	<false/>
+
+	<!-- The script exits nonzero deliberately: 1 refused, 2 an operation
+	     failed, 3 deferred for a scrub. KeepAlive would read all three as
+	     something to retry immediately. Retrying "the pool is not imported" in
+	     a tight loop is not a fix, and retrying a failed 400 GB upload without
+	     a human looking is worse than waiting for tomorrow's fire. -->
+	<key>KeepAlive</key>
+	<false/>
+
+	<!-- This job is network-bound and long. Nice it down so a six-hour upload
+	     does not compete with Jellyfin transcoding or a scrub that starts
+	     while it is still running. -->
+	<key>Nice</key>
+	<integer>5</integer>
+
+	<!-- The script writes its own timestamped log. This catches only what
+	     escapes it: a stray stderr line from restic, or the shell dying before
+	     logging is set up. It should stay near-empty — tank-snapshot's
+	     equivalent holds nothing but newsyslog's creation line, and that is
+	     the sign to look for. -->
+	<key>StandardOutPath</key>
+	<string>/var/log/tank-offsite.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/tank-offsite.launchd.log</string>
+</dict>
+</plist>

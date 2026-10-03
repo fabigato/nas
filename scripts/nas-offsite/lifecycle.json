@@ -1,0 +1,37 @@
+{
+	"Rules": [
+		{
+			"ID": "data-to-deep-archive-after-7-days",
+			"Status": "Enabled",
+			"Filter": {
+				"Prefix": "data/"
+			},
+			"Transitions": [
+				{
+					"Days": 7,
+					"StorageClass": "DEEP_ARCHIVE"
+				}
+			]
+		},
+		{
+			"ID": "expire-noncurrent-versions-at-180-days",
+			"Status": "Enabled",
+			"Filter": {
+				"Prefix": ""
+			},
+			"NoncurrentVersionExpiration": {
+				"NoncurrentDays": 180
+			}
+		},
+		{
+			"ID": "abort-incomplete-uploads-after-7-days",
+			"Status": "Enabled",
+			"Filter": {
+				"Prefix": ""
+			},
+			"AbortIncompleteMultipartUpload": {
+				"DaysAfterInitiation": 7
+			}
+		}
+	]
+}

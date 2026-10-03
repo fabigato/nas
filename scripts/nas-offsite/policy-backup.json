@@ -1,0 +1,32 @@
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Sid": "ListTheBucket",
+			"Effect": "Allow",
+			"Action": [
+				"s3:ListBucket",
+				"s3:GetBucketLocation",
+				"s3:ListBucketMultipartUploads"
+			],
+			"Resource": "arn:aws:s3:::__BUCKET__"
+		},
+		{
+			"Sid": "ReadAndWriteObjectsButNeverDeleteThem",
+			"Effect": "Allow",
+			"Action": [
+				"s3:GetObject",
+				"s3:PutObject",
+				"s3:ListMultipartUploadParts",
+				"s3:AbortMultipartUpload"
+			],
+			"Resource": "arn:aws:s3:::__BUCKET__/*"
+		},
+		{
+			"Sid": "DeleteLocksOnly",
+			"Effect": "Allow",
+			"Action": "s3:DeleteObject",
+			"Resource": "arn:aws:s3:::__BUCKET__/locks/*"
+		}
+	]
+}
