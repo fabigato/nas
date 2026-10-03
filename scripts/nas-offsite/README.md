@@ -140,6 +140,68 @@ Plain `restic check`, without `--read-data`, is metadata-only and runs after
 every backup. It works fine against Deep Archive because it never touches
 `data/`.
 
+### Restore when the Mac is gone — the actual disaster
+
+The recipe above assumes a working machine with `/etc/tank-offsite` on it. This
+one assumes none of that, which is the case copy 3 exists for.
+
+> **UNREHEARSED.** Every step below is reasoned, not measured — `tests/offsite-restore/`
+> does not exist yet. The 2026-10-03 verification restored from **Standard**,
+> which proves the repository is readable and says nothing about the Glacier
+> path. Treat this as a draft until it has been run once for real.
+
+**What you need, none of which is on the dead machine:** the repository password
+(`pass nas/offsite-repo`), the bucket name and region (same place), and an AWS
+credential (`pass nas/offsite-prune-aws`, which can read and issue restores).
+
+**1. Wake the data up. This is the step people forget.** restic cannot read a
+Deep Archive object at all — not slowly, *at all*. Every object under `data/`
+must be restored to a readable tier first, and that takes 12 h (Standard) or
+48 h (Bulk, cheaper). Nothing in restic triggers this; it is an S3 operation.
+
+```sh
+B=tank-offsite-xxxxxxxx
+aws s3api list-objects-v2 --bucket "$B" --prefix data/ \
+  --query 'Contents[?StorageClass==`DEEP_ARCHIVE`].Key' --output text \
+  | tr '\t' '\n' >/tmp/cold.txt
+wc -l /tmp/cold.txt                     # ~8000 objects at 64 MiB packs
+
+while read -r k; do
+  aws s3api restore-object --bucket "$B" --key "$k" \
+    --restore-request 'Days=14,GlacierJobParameters={Tier=Bulk}'
+done </tmp/cold.txt
+```
+
+`Days=14` because the restored copies are temporary and 491 GiB takes ~15 h to
+pull down at 85 Mbit — do not set it to 1 and watch them expire mid-download.
+For this object count a loop is fine; S3 Batch Operations is the tool if the
+repository ever grows an order of magnitude.
+
+**2. Wait, then confirm.** `ongoing-request="false"` means that object is ready.
+
+```sh
+aws s3api head-object --bucket "$B" --key "$(head -1 /tmp/cold.txt)" --query Restore
+```
+
+**3. Then restic, with everything set by hand.**
+
+```sh
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+export RESTIC_REPOSITORY=s3:s3.eu-central-1.amazonaws.com/$B
+export RESTIC_PASSWORD=...              # from pass nas/offsite-repo
+restic snapshots
+restic restore <id> --target /recovered
+```
+
+**Budget, at 491 GiB:** ~$1.25 Bulk retrieval, ~$44 egress after the free 100 GB,
+and about two days wall-clock — 48 h of thaw plus 15 h of download. The money is
+not the problem; assuming it is a two-hour job is.
+
+**You cannot cheaply restore just a few files.** Which packs hold a given file is
+not something you can read off the outside of the bucket, so budget for thawing
+all of `data/`. This is the main thing Deep Archive costs you, and it is the
+right trade for a copy you hope never to read.
+
 ### Drop a snapshot you know is junk
 
 ```sh
