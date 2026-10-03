@@ -700,7 +700,12 @@ while read -r TPATH INTERVAL_DAYS; do
 	# the lines that matter are impossible to find.
 	XNOISE=$(printf '%s\n' "$OUT" | grep -c 'com.apple.FinderInfo')
 	XREAL=$(printf '%s\n' "$OUT" | grep '^error:' | grep -vc 'com.apple.FinderInfo')
-	printf '%s\n' "$OUT" | grep -v 'com.apple.FinderInfo' | sed 's/^/    /' >>"$LOG"
+	# Drop the blank line restic emits AFTER each error, not just the error
+	# itself. Filtering only the error text left 18 four-space lines in the log
+	# on 2026-10-03 — the same wall of noise this exists to remove, minus the
+	# words, and just as effective at pushing the real output off a screen.
+	printf '%s\n' "$OUT" | grep -v 'com.apple.FinderInfo' |
+		grep -v '^[[:space:]]*$' | sed 's/^/    /' >>"$LOG"
 	[ "$XNOISE" -gt 0 ] &&
 		log "    ($XNOISE com.apple.FinderInfo xattr errors suppressed — expected, see below)"
 

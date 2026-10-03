@@ -435,6 +435,13 @@ else
 	bad "STATE WAS STILL WRITTEN — no retry loop"
 fi
 grep -q 'could not be read' "$T/log" && ok "alerted about the real unreadable file" || bad "alerted about the real unreadable file"
+# restic emits a blank line after every error. Filtering the error text alone
+# leaves the blanks behind, which is the same log flood minus the words.
+if awk 'BEGIN{r=0;m=0} /^[[:space:]]*$/{r++; if(r>m)m=r; next} {r=0} END{exit !(m>1)}' "$T/log"; then
+	bad "no runs of blank lines left in the log"
+else
+	ok "no runs of blank lines left in the log"
+fi
 
 echo
 echo "18. ...and the next run then correctly reports not-due"
