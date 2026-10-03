@@ -20,6 +20,7 @@ Everything here assumes the OpenZFS-on-macOS fork with binaries in
 | `scripts/nas-scrub/` | Monthly scrub, with guards and Discord alerting |
 | `scripts/nas-snapshot/` | Daily snapshots with tiered retention |
 | `scripts/nas-backup/` | Creating the offline backup pool, and replicating to it |
+| `scripts/nas-offsite/` | The third copy — encrypted into S3 Glacier Deep Archive. Has its own [README](scripts/nas-offsite/README.md) for bootstrap and day-to-day use |
 | `scripts/nas-jellyfin/` | The media server the pool exists to serve |
 | `tests/` | Test harnesses — see [Tests](#tests) |
 
@@ -60,6 +61,12 @@ All three are `LaunchDaemons` in `/Library/LaunchDaemons`. Each writes a durable
 log under `/var/log/` and communicates its outcome through its exit code, so
 `launchctl print system/<label> | grep 'last exit'` is enough to know where you
 stand.
+
+Two more daemons exist and are documented in their own sections because they are
+not about keeping the pool healthy: [`local.tank-offsite`](#the-offsite-copy--bootstrap-offsitesh-then-tank-offsitesh)
+and [`local.jellyfin`](#jellyfin--localjellyfin). They follow the same
+conventions. `tank-backup.sh` is the odd one out — deliberately **not** a daemon,
+because the drive it writes to is meant to be unplugged.
 
 ### Boot unlock — `local.tank-boot-unlock`
 
@@ -428,6 +435,53 @@ Two standing rules follow:
   good copy is the entire value of the check. It is not part of the restore test
   and there is no daemon for it: `sudo /usr/local/zfs/bin/zpool scrub tankbak`.
 
+## The offsite copy — `bootstrap-offsite.sh`, then `tank-offsite.sh`
+
+`tankbak` survives the enclosure and the machine. It does not survive the room.
+This is the copy that does: an encrypted restic repository in S3 Glacier Deep
+Archive, `eu-central-1`, driven by `local.tank-offsite` daily at 01:30.
+
+Bootstrap and day-to-day operation — adding a target, excluding a pattern,
+restoring and verifying — are in [`scripts/nas-offsite/README.md`](scripts/nas-offsite/README.md).
+What follows is only the shape.
+
+**It is versioned, not a mirror.** Unlike `tank-backup.sh`, which is explicitly
+a current-state mirror, this keeps history. Not for the usual reason — local
+snapshots already cover "I deleted a folder in March" — but because the offsite
+job is the one whose *script* can be wrong. A mirror with a bad path list
+silently deletes the remote copy; a snapshot repository with the same bug writes
+a thin snapshot next to the good ones. History is also nearly free: Deep Archive
+bills a 180-day minimum per object, so deleting anything sooner frees no money.
+
+**Targets are paths, not datasets.** `media` as a bulk is re-downloadable and
+excluded, but a chosen folder inside it can be backed up. The list lives in
+`/etc/tank-offsite/targets` rather than in the script — unlike the snapshot
+retention table, which is policy that changes once a year, this is a list that
+grows whenever another folder starts mattering.
+
+**Due-ness is age-based, from one daily job.** Same hole as `local.tank-snapshot`
+avoids, and the same fix: a `Day 1` monthly trigger that misses its window is
+silently skipped for a month. It also defers while a scrub is running, which is
+free precisely because nothing is tied to the calendar.
+
+**Two IAM users, and the split is the security model.** The Mac is not
+FileVault-encrypted, so assume someone with it can *read* the archive — the same
+trade `tank.key` already makes. What they cannot do is destroy it. The credential
+on the machine has no `DeleteObject` outside `locks/`; the one that can delete
+lives only in `pass`; neither can touch object *versions*; and space is reclaimed
+by a lifecycle rule no credential here can edit.
+
+**The lifecycle rule is scoped to `data/`.** restic must read `config`, `keys/`,
+`index/` and `snapshots/` on every run. A blanket transition would make the
+repository unopenable — weeks later, when the transition finally fired, not on
+the day it was configured.
+
+**`restic check --read-data` is not available.** Re-verifying every chunk means
+pulling the whole archive out of Glacier. The metadata-only check runs after
+every backup; the deep one is only affordable in the 7 days before a pack
+transitions. That gap is real, and it is why the restore test is quarterly and
+two-phase.
+
 ## Jellyfin — `local.jellyfin`
 
 The reason the pool exists. Serves `tank/media` and `tank/my_media` over
@@ -494,7 +548,13 @@ sudo install -m 644 -o root -g wheel scripts/nas-snapshot/local.tank-snapshot.pl
 sudo launchctl bootstrap system /Library/LaunchDaemons/local.tank-snapshot.plist
 ```
 
-Same pattern for the other two. Log rotation is one file covering all of them:
+Same pattern for the others, with one exception: `tank-offsite.sh` reads
+`/etc/tank-offsite/{env,backup.env,repo.pass}`, which `bootstrap-offsite.sh`
+stages and you install separately — it refuses to start without them. Its target
+and exclude lists live there too. See
+[`scripts/nas-offsite/README.md`](scripts/nas-offsite/README.md).
+
+Log rotation is one file covering all of them:
 
 ```sh
 sudo install -m 644 -o root -g wheel scripts/nas-scrub/tank.newsyslog.conf /etc/newsyslog.d/tank.conf
@@ -565,6 +625,7 @@ that will fire on the next `bootstrap` of the system domain.
 | `tests/scan-parse/` | Fixture tests for the scrub daemon's `zpool status` parser, over completed / in-progress / repaired / errored / canceled / resilvering / never-scanned output |
 | `tests/backup-restore/` | Proves the offline backup is *restorable*, not just that the send exited 0: known payload and sha256 manifest, then cold import, passphrase, read-only mount, checksum verification and write-rejection probes. Partly manual — the physical unplug in the middle is the point and cannot be scripted |
 | `tests/jellyfin-readonly/` | Asserts Jellyfin writes nothing into the media datasets, via `written@` and `zfs diff` across a full library scan. Three phases, because the scan in the middle is slow. macOS's own `.DS_Store` / Spotlight writes are classified as noise rather than failures |
+| `tests/offsite-rehearsal/` | Drives `tank-offsite.sh` against a local restic repository with stubbed `zfs`/`zpool`. No AWS, no pool, seconds to run. Reaches the branches a real run cannot: the unmounted and empty-mountpoint refusals, the scrub deferral, concurrent-run deferral, stale-lock clearing, config validation, and the exit-3 retry-loop regression |
 | `tests/2026-08-17-drive-pull/` | Procedure, observation harness and captured logs from physically pulling a drive from the running mirror |
 
 Two things to know before editing `tests/snapshot-retention/`:

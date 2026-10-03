@@ -76,6 +76,81 @@ stages the three config files under `./staged/` with mode 0600 and prints a
 | IAM user 2 | `tank-offsite-prune` — can delete objects, but **not** object *versions*. Its key lives only in `pass`. |
 | restic repo | initialised at the bucket root, repository format 2 |
 
+## Operating it, once it exists
+
+Everything above is a one-time bootstrap. These are the things you actually do.
+
+### Add a folder to the backup
+
+```sh
+sudo vi /etc/tank-offsite/targets        # <path relative to /Volumes/tank>  <days>
+sudo launchctl kickstart -k system/local.tank-offsite
+```
+
+Targets are **paths, not datasets**, so a chosen folder inside an otherwise
+excluded dataset can be included — `media/concerts 30`. That is the whole point:
+`media` as a bulk is re-downloadable and has no offsite priority, but individual
+folders in it can still matter.
+
+Relative paths only, no `..`. A new target has no state file, so it uploads on
+the next run. A **syntax** error refuses the whole run, because a table that does
+not parse cannot be trusted. A path that **does not exist** takes out only its own
+target and alerts — refusing everything would mean one renamed folder stops every
+offsite backup, and you get the alert either way.
+
+### Exclude something
+
+```sh
+sudo vi /etc/tank-offsite/exclude        # one restic pattern per line
+```
+
+macOS cruft is already excluded inside the script and should not be repeated
+here: `.DS_Store`, `.Spotlight-V100`, `.fseventsd`, `.Trashes`,
+`.TemporaryItems`, `.DocumentRevisions-V100`. That list is a fact about the
+platform; this file is your opinion.
+
+Takes effect on the next run. Copies already archived stay in the snapshots that
+reference them until those age out — excluding something does not reach backwards.
+
+### Restore, and verify
+
+```sh
+sudo -i
+set -a; . /etc/tank-offsite/env; . /etc/tank-offsite/backup.env; set +a
+export RESTIC_PASSWORD_FILE=/etc/tank-offsite/repo.pass
+export RESTIC_CACHE_DIR=/var/cache/tank-offsite
+
+restic snapshots                                            # what is there
+restic restore latest --tag documents --target /tmp/restoretest
+diff -r /tmp/restoretest/Volumes/tank/documents /Volumes/tank/documents
+restic check --read-data-subset=2%                          # re-verify real packs
+restic unlock                                               # if "already locked"
+```
+
+`diff` listing the excluded cruft as present only in the source is correct, not
+a discrepancy.
+
+**`--read-data-subset` is only cheap while the packs are still in Standard — the
+first 7 days after upload.** It is the one check that proves the *stored bytes*
+are the bytes you sent, rather than that the bookkeeping is self-consistent.
+After the lifecycle transition it needs a Glacier restore first and a 12-hour
+wait, which is why the quarterly restore test has to be a two-phase job.
+
+Plain `restic check`, without `--read-data`, is metadata-only and runs after
+every backup. It works fine against Deep Archive because it never touches
+`data/`.
+
+### Drop a snapshot you know is junk
+
+```sh
+sudo /usr/local/sbin/tank-offsite.sh --drop <snapshot-id>
+```
+
+Lists what is there, asks you to retype the id, then forgets it and reclaims the
+space. Note that Deep Archive bills a 180-day minimum per object, so deleting
+anything sooner than that frees no money — only space you were going to stop
+paying for anyway.
+
 ## The three things that must survive this machine
 
 The whole point of copy 3 is the Mac being destroyed or stolen. If any of these
