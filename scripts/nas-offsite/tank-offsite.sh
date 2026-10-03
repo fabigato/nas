@@ -845,10 +845,22 @@ check_storage_classes() {
 
 	csc_bad=''
 	for csc_pfx in config keys/ index/ snapshots/ locks/; do
+		# The `grep -v None` is load-bearing and cost a false alarm to find.
+		# When a prefix matches NO objects, list-objects-v2 leaves Contents
+		# out of the response entirely, the JMESPath expression evaluates to
+		# null, and --output text renders that as the literal string "None".
+		# Without this filter an EMPTY prefix reads as a violation — and
+		# locks/ is empty almost always, since restic removes its own locks
+		# and this script calls `restic unlock` before anything else.
+		#
+		# So the very first real run alerted "the repository will stop
+		# opening" about a perfectly healthy bucket. Found because the test
+		# stub returned "" where AWS returns "None": the fake was kinder than
+		# reality, so the suite passed on code that could not work.
 		csc_out=$("$AWS_CLI" s3api list-objects-v2 --bucket "$BUCKET" \
 			--prefix "$csc_pfx" \
 			--query 'Contents[?StorageClass!=`STANDARD`].[Key,StorageClass]' \
-			--output text 2>/dev/null)
+			--output text 2>/dev/null | grep -v '^None$' | sed '/^[[:space:]]*$/d')
 		[ -n "$csc_out" ] && csc_bad="$csc_bad$csc_out
 "
 	done
@@ -873,7 +885,8 @@ no backup can run and no restore can start.
 	# asked to go and look.
 	csc_dist=$("$AWS_CLI" s3api list-objects-v2 --bucket "$BUCKET" --prefix data/ \
 		--query 'Contents[].StorageClass' --output text 2>/dev/null |
-		tr '\t' '\n' | sort | uniq -c | tr -s ' ' | tr '\n' ' ')
+		tr '\t' '\n' | grep -v '^None$' | sed '/^[[:space:]]*$/d' |
+		sort | uniq -c | tr -s ' ' | tr '\n' ' ')
 	log "  storage classes OK: metadata all STANDARD; data/ —${csc_dist:- empty}"
 	return 0
 }

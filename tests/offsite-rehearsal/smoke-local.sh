@@ -126,8 +126,17 @@ data/)
 	# the last week still warm
 	printf 'DEEP_ARCHIVE\tDEEP_ARCHIVE\tDEEP_ARCHIVE\tSTANDARD\n' ;;
 *)
-	# metadata. Empty = all STANDARD = healthy.
-	[ -n "${STUB_SCLASS_BAD:-}" ] && printf 'index/9f2a1c\tDEEP_ARCHIVE\n' ;;
+	# metadata. A prefix with NO matching objects is the common case —
+	# locks/ is empty almost always — and the AWS CLI prints the literal
+	# string "None" for it, because Contents is absent from the response
+	# and --output text renders null that way. Emitting "" here instead
+	# was a fake kinder than reality, and it hid a false-positive alert
+	# that fired on the real bucket within the hour.
+	if [ -n "${STUB_SCLASS_BAD:-}" ]; then
+		printf 'index/9f2a1c\tDEEP_ARCHIVE\n'
+	else
+		printf 'None\n'
+	fi ;;
 esac
 exit 0
 STUB
@@ -491,6 +500,9 @@ grep -q 'storage-class:\[ok\]' "$T/log" && ok "verdict carries the result" || ba
 # The data/ distribution is an observation, not an assertion: packs under 7
 # days old are legitimately still warm, so there is no threshold to alert on.
 grep -q 'DEEP_ARCHIVE' "$T/log" && ok "logs the data/ distribution" || bad "logs the data/ distribution"
+# An empty prefix is the common case, not an edge case. AWS prints "None"
+# for it, which must not read as an object in the wrong storage class.
+grep -q 'None' "$T/log" && bad "the literal None never reaches the verdict" || ok "the literal None never reaches the verdict"
 
 echo
 echo "20. Metadata going cold must alert — restic could not open the repo at all"
