@@ -77,6 +77,16 @@ echo "re-downloadable" >"$T/mnt/media/dont-back-this-up/movie.txt"
 # The exclude that matters on this pool: Finder writes .DS_Store on DISPLAY, and
 # on my_media a rewrite costs ~100x its size in `written` at recordsize=1M.
 printf 'finder junk' >"$T/mnt/my_media/.DS_Store"
+# The rest of the macOS cruft family. .Spotlight-V100 is the one that actually
+# bit on 2026-10-03: SIP makes it unreadable even as root, restic exits 3, and
+# the run alerts every night forever unless it is never opened in the first
+# place. Here they are merely present, which is enough to prove exclusion.
+mkdir -p "$T/mnt/my_media/.Spotlight-V100" "$T/mnt/my_media/.fseventsd" \
+	"$T/mnt/my_media/.Trashes" "$T/mnt/my_media/.TemporaryItems" \
+	"$T/mnt/my_media/.DocumentRevisions-V100"
+for d in .Spotlight-V100 .fseventsd .Trashes .TemporaryItems .DocumentRevisions-V100; do
+	echo cruft >"$T/mnt/my_media/$d/index"
+done
 
 # --- stub zpool: healthy, no scan running ---
 cat >"$T/bin/zpool" <<'STUB'
@@ -193,6 +203,31 @@ if RESTIC_REPOSITORY="$T/repo" RESTIC_PASSWORD_FILE="$T/conf/repo.pass" \
 else
 	ok ".DS_Store excluded"
 fi
+
+echo
+echo "2b. The whole macOS cruft family is excluded, not just .DS_Store"
+cruft_leaked=0
+for d in .Spotlight-V100 .fseventsd .Trashes .TemporaryItems .DocumentRevisions-V100; do
+	if RESTIC_REPOSITORY="$T/repo" RESTIC_PASSWORD_FILE="$T/conf/repo.pass" \
+		"$RESTIC_BIN" ls latest --tag my_media 2>/dev/null | grep -q "$d"; then
+		bad "$d excluded"; cruft_leaked=1
+	fi
+done
+[ "$cruft_leaked" = 0 ] && ok "all five macOS metadata dirs excluded"
+
+echo
+echo "2c. A user exclude file is honoured on top of the built-in list"
+mkdir -p "$T/mnt/my_media/scratch"; echo tmp >"$T/mnt/my_media/scratch/wip.tmp"
+echo 'scratch' >"$T/conf/exclude"
+: >"$T/log"
+run_offsite --force --only my_media >/dev/null 2>&1
+if RESTIC_REPOSITORY="$T/repo" RESTIC_PASSWORD_FILE="$T/conf/repo.pass" \
+	"$RESTIC_BIN" ls latest --tag my_media 2>/dev/null | grep -q 'wip.tmp'; then
+	bad "user exclude file honoured"
+else
+	ok "user exclude file honoured"
+fi
+rm -f "$T/conf/exclude"
 
 echo
 echo "3. Immediate re-run — nothing is due, nothing is uploaded"

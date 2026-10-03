@@ -229,6 +229,7 @@ done
 # Edit /etc/tank-offsite/targets; the built-in list below is only the fallback
 # for a machine where that file does not exist yet.
 TARGETS_FILE=${TANK_OFFSITE_TARGETS:-$CONF_DIR/targets}
+EXCLUDE_FILE=${TANK_OFFSITE_EXCLUDE:-$CONF_DIR/exclude}
 
 targets() {
 	if [ -f "$TARGETS_FILE" ]; then
@@ -641,12 +642,40 @@ while read -r TPATH INTERVAL_DAYS; do
 		continue
 	fi
 
+	# macOS VOLUME CRUFT. Every one of these is derived or disposable, and
+	# several are unreadable even as root because SIP protects them — which is
+	# how they got here: .Spotlight-V100 produced
+	#   error: openfile for readdirnames failed: ... operation not permitted
+	# on 2026-10-03, restic exited 3, and the run alerted. Left alone that is a
+	# nightly false alarm forever, because Spotlight's index is never going to
+	# become readable.
+	#
+	# Excluding beats classifying. An earlier fix whitelisted the
+	# com.apple.FinderInfo errors as benign and left everything else alerting,
+	# which was right in shape and too narrow in fact: FinderInfo is one member
+	# of a family and the next member just re-opens the same wound. Not reading
+	# them at all means there is no error to judge.
+	#
+	# Nothing here is user data. Spotlight's index and .fseventsd are
+	# regenerable journals, .Trashes is already-deleted files, .TemporaryItems
+	# is scratch, .DocumentRevisions-V100 is the Versions store for documents
+	# this pool does not hold. .DS_Store is the one you already measured at
+	# ~100x write amplification on a recordsize=1M dataset.
 	set -- \
 		--tag "$TPATH" --tag offsite \
 		--pack-size "$PACK_SIZE" \
 		--exclude .DS_Store \
+		--exclude .Spotlight-V100 \
+		--exclude .fseventsd \
+		--exclude .Trashes \
+		--exclude .TemporaryItems \
+		--exclude .DocumentRevisions-V100 \
 		--exclude-caches \
 		--one-file-system
+	# Anything you want left out that is not platform cruft goes here, one
+	# pattern per line. Kept separate from the list above because that one is
+	# a fact about macOS and this one is your opinion.
+	[ -f "$EXCLUDE_FILE" ] && set -- "$@" --exclude-file "$EXCLUDE_FILE"
 	# A second tag naming the dataset, but only when it adds anything — for a
 	# whole-dataset target the two strings are identical.
 	[ "$DSET" != "$TPATH" ] && set -- "$@" --tag "$DSET"
