@@ -428,6 +428,31 @@ is how a backup deletes your library."
 	return 0
 }
 
+# CLEAR LOCKS LEFT BY A DEAD PROCESS, AND YES, AUTOMATICALLY.
+#
+# An earlier version of this file said an automatic unlock "would break the one
+# thing stopping two runs from writing at once". That was wrong on both halves.
+# The thing stopping two runs is $LOCKDIR above, taken before any of this; and
+# plain `restic unlock` — no --remove-all — only removes locks whose creating
+# process is GONE, which is the same liveness test $LOCKDIR already does. A
+# lock held by a live restic is left exactly where it is.
+#
+# Needed because something in the 2026-10-03 run left a lock behind and it was
+# still there 23 minutes later, long after that PID had exited. --retry-lock
+# does not help with that: waiting five minutes for a lock nobody will ever
+# release only fails more slowly. restic takes SHARED locks for backup and
+# restore and an EXCLUSIVE one for check, so a leftover shared lock is
+# invisible to every backup and restore and blocks only the check — which is
+# why it surfaced as "your repository is broken" rather than as a stuck run.
+UNLOCK_OUT=$("$RESTIC" unlock 2>&1)
+case "$UNLOCK_OUT" in
+*"successfully removed"*)
+	log "  cleared a stale restic lock — $UNLOCK_OUT"
+	log "    (a previous run exited without releasing it; harmless, but if this"
+	log "     appears every run something is dying mid-command — check above.)"
+	;;
+esac
+
 # --------------------------------------------------------------- list / drop
 
 if [ "$MODE" = list ]; then
