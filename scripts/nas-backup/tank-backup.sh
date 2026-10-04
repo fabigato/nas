@@ -289,6 +289,29 @@ esac
 # auto-import is off via /etc/zfs/noautoimport and tank-boot-unlock.sh imports
 # `tank` by name only.
 if ! "$ZPOOL" list -H -o name "$DST_POOL" >/dev/null 2>&1; then
+	# A dry run cannot import, and everything below reads the imported pool —
+	# health, keystatus, the destination's snapshots. It used to fall through
+	# anyway: run() skipped the import, the health check then read nothing and
+	# REFUSED with '<unreadable>', and maybe_export claimed the pool had been
+	# "left imported" when it never was. A perfectly healthy drive looked broken.
+	# So the most a dry run can say here is what the scan says — the scan only
+	# reads labels and changes nothing — and it stops there.
+	if [ "$DRY_RUN" = 1 ]; then
+		log "$DST_POOL not imported — scanning $DEV_DIR (read-only, imports nothing)"
+		scan=$("$ZPOOL" import -d "$DEV_DIR" 2>&1)
+		echo "$scan" | sed 's/^/         /' | tee -a "$LOG"
+		scan_state=$(echo "$scan" | awk -v p="$DST_POOL" '
+			$1 == "pool:" { found = ($2 == p) }
+			found && $1 == "state:" { print $2; exit }')
+		if [ "$scan_state" = "ONLINE" ]; then
+			log "DRY RUN: $DST_POOL is present and importable (ONLINE)."
+			log "         Stopping here: the send plan needs the pool imported."
+			log "         Run without --dry-run to import, unlock and sync."
+			exit 0
+		fi
+		log "REFUSED: $DST_POOL scan state is '${scan_state:-<not found>}', not ONLINE."
+		exit 1
+	fi
 	log "$DST_POOL not imported — importing from $DEV_DIR"
 	if ! run "$ZPOOL" import -d "$DEV_DIR" "$DST_POOL"; then
 		log "REFUSED: could not import $DST_POOL from $DEV_DIR."
