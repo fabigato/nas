@@ -151,6 +151,10 @@ finish() {
 	exit "$rc"
 }
 
+# umask 077 is for the copy, which holds .env. The logs hold no secrets and are
+# 644 like the other daemons', so `cat hermes-backup.last` works without sudo.
+touch "$LOG" "$LAST" && chmod 644 "$LOG" "$LAST"
+
 log "--- hermes-backup start (force=$FORCE) ---"
 
 # --- guards ---------------------------------------------------------------
