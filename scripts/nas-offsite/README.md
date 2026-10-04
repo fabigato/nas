@@ -112,6 +112,20 @@ platform; this file is your opinion.
 Takes effect on the next run. Copies already archived stay in the snapshots that
 reference them until those age out — excluding something does not reach backwards.
 
+### When did it last run, and when will it run next
+
+Nightly at 01:30. Each target uploads when its last successful run is older
+than its interval; a new target has no state file, so it goes on the next run.
+
+```sh
+cat /var/log/tank-offsite.last          # one-line summary of the last run
+ls -l /var/lib/tank-offsite/            # <target>.last per target, / becomes _
+tail -50 /var/log/tank-offsite.log      # the full story
+```
+
+- A syntax error in `targets` refuses the whole run, not just the new line.
+- A scrub or resilver in progress defers the run to the next night.
+
 ### Restore, and verify
 
 ```sh
