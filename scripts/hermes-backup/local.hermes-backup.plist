@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.hermes-backup</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/hermes-backup.sh</string>
+	</array>
+
+	<!-- Root, not UserName=fabigato: the alert webhook is in zed.rc, 0600 root.
+	     The script drops to fabigato for everything that touches ~/.hermes or
+	     the copy; see design 1 in the script header. -->
+
+	<!-- DAILY, 01:00 — half an hour ahead of local.tank-offsite at 01:30, so
+	     the off-site run sees a finished copy rather than a swap in progress.
+	     The run takes seconds. A missed fire (Mac asleep) runs once at the next
+	     wake, and since every run is a full copy, a skipped day costs only that
+	     day. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>1</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+
+	<!-- Same as the other scheduled daemons: no run on every reboot, and no
+	     retrying a refusal ("tank/documents not mounted", "state.db shrank") in a
+	     loop. Those need a human, and the alert says so. -->
+	<key>RunAtLoad</key>
+	<false/>
+	<key>KeepAlive</key>
+	<false/>
+
+	<key>Nice</key>
+	<integer>5</integer>
+
+	<key>StandardOutPath</key>
+	<string>/var/log/hermes-backup.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/hermes-backup.launchd.log</string>
+</dict>
+</plist>
