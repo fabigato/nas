@@ -240,8 +240,15 @@ right trade for a copy you hope never to read.
 ### Drop a snapshot you know is junk
 
 ```sh
-sudo /usr/local/sbin/tank-offsite.sh --drop <snapshot-id>
+sudo -v                                 # get sudo's password prompt out of the way
+pass show nas/offsite-prune-aws | sudo /usr/local/sbin/tank-offsite.sh --drop <snapshot-id>
 ```
+
+It needs the **prune credential** piped in: the backup credential on this
+machine cannot delete anything but locks, by design (see the threat model). The
+key is read from the pipe and never written to disk. It shows only the snapshot
+being dropped, asks you to type its id at the terminal, then forgets it and
+deletes whatever data no remaining snapshot uses.
 
 Lists what is there, asks you to retype the id, then forgets it and reclaims the
 space. Note that Deep Archive bills a 180-day minimum per object, so deleting

@@ -56,9 +56,10 @@ STUB_SCLASS_BAD=
 STUB_AWS=
 STUB_RESTORE_FAIL=
 STUB_BACKUP_UNCHANGED=
+STUB_FORGET_FAIL=
 reset_stubs() {
 	STUB_HEALTH=ONLINE; STUB_SCAN=; STUB_MOUNTED=yes
-	STUB_SCLASS_BAD=; STUB_AWS=; STUB_RESTORE_FAIL=; STUB_BACKUP_UNCHANGED=
+	STUB_SCLASS_BAD=; STUB_AWS=; STUB_RESTORE_FAIL=; STUB_BACKUP_UNCHANGED=; STUB_FORGET_FAIL=
 }
 
 PASS=0
@@ -157,6 +158,14 @@ if [ "\$1" = restore ] && [ -n "\${STUB_RESTORE_FAIL:-}" ]; then
 	echo "Fatal: stub restore failure for the smoke test" >&2
 	exit 1
 fi
+# STUB_FORGET_FAIL: forget refused, as the backup credential is by S3.
+if [ "\$1" = forget ] && [ -n "\${STUB_FORGET_FAIL:-}" ]; then
+	echo "Remove(<snapshot/x>) failed: AccessDenied (stub)" >&2
+	exit 1
+fi
+if [ "\$1" = prune ] && [ -n "\${STUB_FORGET_FAIL:-}" ]; then
+	echo "PRUNE RAN" >&2
+fi
 if [ "\$1" = backup ] && [ -n "\${STUB_BACKUP_UNCHANGED:-}" ]; then
 	exec "$RESTIC_BIN" "\$@" --dry-run
 fi
@@ -207,6 +216,8 @@ run_offsite() {
 		TANK_OFFSITE_HEARTBEAT="$T/heartbeat" \
 		TANK_OFFSITE_ZEDRC="$T/conf/zed.rc" \
 		TANK_OFFSITE_LOCKDIR="$T/lock" \
+		TANK_OFFSITE_DROP_TTY="$T/tty" \
+		STUB_FORGET_FAIL="${STUB_FORGET_FAIL:-}" \
 		TANK_OFFSITE_AWS="${STUB_AWS:-$T/bin/aws}" \
 		STUB_SCLASS_BAD="${STUB_SCLASS_BAD:-}" \
 		TANK_OFFSITE_LIMIT_UP=0 \
@@ -584,6 +595,73 @@ run_offsite --force --only media/concerts; rc=$?
 check "exit code" "$rc" 0
 grep -q 'media/concerts: read-back check passed' "$T/log" && ok "read-back passed" || bad "read-back passed"
 check "marker cleared" "$(ls "$T/state" | grep -c '^media_concerts.unverified$')" 0
+
+echo
+echo "25. --drop shows ONLY the snapshot it will forget"
+reset_stubs
+drop_id=$(RESTIC_REPOSITORY="$T/repo" RESTIC_PASSWORD_FILE="$T/conf/repo.pass" \
+	"$RESTIC_BIN" snapshots --json --tag documents 2>/dev/null |
+	grep -o '"short_id":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+other_id=$(RESTIC_REPOSITORY="$T/repo" RESTIC_PASSWORD_FILE="$T/conf/repo.pass" \
+	"$RESTIC_BIN" snapshots --json --tag my_media 2>/dev/null |
+	grep -o '"short_id":"[0-9a-f]*"' | head -1 | cut -d'"' -f4)
+before=$(nsnaps)
+echo "$drop_id" >"$T/tty"
+run_offsite --dry-run --drop "$drop_id" </dev/null; rc=$?
+check "exit code" "$rc" 0
+grep -q "$drop_id" "$T/stdout" && ok "lists the snapshot being dropped" || bad "lists the snapshot being dropped"
+grep -q "$other_id" "$T/stdout" && bad "does not list any other snapshot" || ok "does not list any other snapshot"
+grep -q "other $((before - 1)) snapshot(s) in the repository are untouched" "$T/stdout" &&
+	ok "says how many are untouched" || bad "says how many are untouched"
+check "dry run forgot nothing" "$(nsnaps)" "$before"
+
+echo
+echo "26. --drop with an id that matches nothing refuses before asking"
+reset_stubs
+echo deadbeef >"$T/tty"
+run_offsite --drop deadbeef </dev/null; rc=$?
+check "exit code" "$rc" 1
+grep -q 'matches 0 snapshots' "$T/log" && ok "says it matched nothing" || bad "says it matched nothing"
+grep -q 'Type the snapshot id' "$T/stdout" && bad "never reached the confirmation prompt" || ok "never reached the confirmation prompt"
+check "nothing forgotten" "$(nsnaps)" "$before"
+
+echo
+echo "27. --drop without the prune credential on stdin refuses"
+reset_stubs
+echo "$drop_id" >"$T/tty"
+printf '' | run_offsite --drop "$drop_id"; rc=$?
+check "exit code" "$rc" 1
+grep -q 'stdin did not hold' "$T/log" && ok "says what stdin was missing" || bad "says what stdin was missing"
+check "nothing forgotten" "$(nsnaps)" "$before"
+
+echo
+echo "28. --drop with the BACKUP credential refuses — it cannot delete"
+reset_stubs
+cat "$T/conf/backup.env" | run_offsite --drop "$drop_id"; rc=$?
+check "exit code" "$rc" 1
+grep -q 'that is the backup credential' "$T/log" && ok "names the wrong credential" || bad "names the wrong credential"
+check "nothing forgotten" "$(nsnaps)" "$before"
+
+echo
+echo "29. A forget that fails stops the drop — no prune, no \"dropped\""
+reset_stubs
+STUB_FORGET_FAIL=1
+printf 'AWS_ACCESS_KEY_ID=AKIAPRUNESTUB\nAWS_SECRET_ACCESS_KEY=prunestub\n' |
+	run_offsite --drop "$drop_id"; rc=$?
+check "exit code" "$rc" 2
+grep -q "forget $drop_id failed" "$T/log" && ok "reports the forget failure" || bad "reports the forget failure"
+grep -q 'PRUNE RAN' "$T/stdout" && bad "prune did not run" || ok "prune did not run"
+grep -q "dropped $drop_id" "$T/log" && bad "does not log dropped" || ok "does not log dropped"
+
+echo
+echo "30. --drop with the prune credential forgets exactly one snapshot"
+reset_stubs
+printf 'AWS_ACCESS_KEY_ID=AKIAPRUNESTUB\nAWS_SECRET_ACCESS_KEY=prunestub\n' |
+	run_offsite --drop "$drop_id"; rc=$?
+check "exit code" "$rc" 0
+check "one snapshot fewer" "$(nsnaps)" "$((before - 1))"
+grep -q "dropped $drop_id" "$T/log" && ok "logged dropped" || bad "logged dropped"
+grep -q 'prunestub' "$T/log" && bad "secret never reaches the log" || ok "secret never reaches the log"
 
 echo
 echo "================================================"

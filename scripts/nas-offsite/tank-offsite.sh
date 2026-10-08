@@ -100,8 +100,10 @@
 #                                           # uplink for ~37 h. Only when nobody
 #                                           # needs the connection.
 #   sudo sh tank-offsite.sh --list          # what is in the repository
-#   sudo sh tank-offsite.sh --drop <id>     # forget one snapshot you know is
-#                                           # junk, then reclaim it
+#   pass show nas/offsite-prune-aws |
+#     sudo sh tank-offsite.sh --drop <id>   # forget one snapshot you know is
+#                                           # junk, then reclaim it. Needs the
+#                                           # prune credential on stdin.
 #
 # Exit codes:
 #   0  ran, or correctly had nothing to do
@@ -171,6 +173,10 @@ VERIFY_MAX_BYTES=${TANK_OFFSITE_VERIFY_MAX_BYTES:-536870912}
 # instead of colliding. /var/run is cleared at boot, which disposes of a lock
 # orphaned by a panic for free.
 LOCKDIR=${TANK_OFFSITE_LOCKDIR:-/var/run/tank-offsite.lock}
+
+# Where --drop reads its typed confirmation. Not stdin: that carries the prune
+# credential.
+DROP_TTY=${TANK_OFFSITE_DROP_TTY:-/dev/tty}
 
 HEARTBEAT_DAYS=${TANK_OFFSITE_HEARTBEAT_DAYS:-30}
 ZEDRC=${TANK_OFFSITE_ZEDRC:-/etc/zfs/zed.d/zed.rc}
@@ -466,22 +472,62 @@ fi
 
 if [ "$MODE" = drop ]; then
 	log "  dropping snapshot $DROP_ID"
-	echo "About to forget snapshot $DROP_ID and reclaim its unreferenced data."
-	echo "This is not reversible. Snapshots currently in the repository:"
+	# Show ONLY the snapshot being dropped. This used to print every snapshot
+	# in the repository under "This is not reversible", which on 2026-10-09
+	# read as if my_media were about to go too. restic exits 0 for an unknown
+	# id, so match on the JSON rather than the exit code.
+	drop_n=$("$RESTIC" snapshots --json "$DROP_ID" 2>/dev/null | grep -o '"short_id"' | wc -l | tr -d ' ')
+	[ "$drop_n" = 1 ] || die "--drop: \"$DROP_ID\" matches $drop_n snapshots, not exactly one — nothing done"
+	drop_total=$("$RESTIC" snapshots --json 2>/dev/null | grep -o '"short_id"' | wc -l | tr -d ' ')
+	echo "About to forget THIS ONE snapshot. Not reversible:"
 	echo
-	"$RESTIC" snapshots --group-by paths 2>&1 | sed 's/^/  /'
+	"$RESTIC" snapshots "$DROP_ID" 2>&1 | sed 's/^/  /'
 	echo
+	echo "The other $((drop_total - 1)) snapshot(s) in the repository are untouched, and"
+	echo "so is every piece of data they use. Prune then deletes only data that no"
+	echo "remaining snapshot refers to — if another snapshot of the same folder"
+	echo "shares this one's data, nothing is freed until that one goes too."
+	echo
+	# stdin carries the prune credential, so the confirmation comes from the
+	# terminal itself.
 	printf 'Type the snapshot id again to confirm: '
-	read -r confirm
+	read -r confirm <"$DROP_TTY"
 	[ "$confirm" = "$DROP_ID" ] || die "confirmation did not match — nothing done"
 	if [ "$DRY_RUN" = 1 ]; then
 		echo "[dry-run] restic forget $DROP_ID && restic prune --max-repack-size 0"
 		exit 0
 	fi
-	"$RESTIC" forget "$DROP_ID" 2>&1 | tee -a "$LOG" || die "forget failed" 2
+
+	# THE BACKUP CREDENTIAL CANNOT DELETE, ON PURPOSE. It has s3:DeleteObject on
+	# locks/ only, so ransomware holding this machine cannot take copy 3 with
+	# it. Deleting needs tank-offsite-prune, whose key lives only in `pass` and
+	# is piped in for this one command — never written here. The first --drop
+	# ever run (2026-10-09) used the backup credential and got AccessDenied.
+	[ -t 0 ] && die "--drop needs the prune credential on stdin:
+  pass show nas/offsite-prune-aws | sudo $0 --drop $DROP_ID"
+	drop_creds=$(cat)
+	drop_key=$(printf '%s\n' "$drop_creds" | awk -F= '/^AWS_ACCESS_KEY_ID=/ { print $2; exit }')
+	drop_secret=$(printf '%s\n' "$drop_creds" | awk -F= '/^AWS_SECRET_ACCESS_KEY=/ { print $2; exit }')
+	unset drop_creds
+	[ -n "$drop_key" ] && [ -n "$drop_secret" ] ||
+		die "--drop: stdin did not hold AWS_ACCESS_KEY_ID= and AWS_SECRET_ACCESS_KEY= lines — nothing done"
+	[ "$drop_key" != "$AWS_ACCESS_KEY_ID" ] ||
+		die "--drop: that is the backup credential, which cannot delete — pipe in nas/offsite-prune-aws"
+	AWS_ACCESS_KEY_ID=$drop_key
+	AWS_SECRET_ACCESS_KEY=$drop_secret
+	export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+
+	# Captured, not piped into tee. `restic forget | tee` reports tee's exit
+	# status, so on 2026-10-09 an AccessDenied forget was followed by a prune
+	# and "dropped" in the log.
+	drop_out=$("$RESTIC" forget "$DROP_ID" 2>&1); drop_rc=$?
+	printf '%s\n' "$drop_out" | tee -a "$LOG"
+	[ "$drop_rc" = 0 ] || die "forget $DROP_ID failed (rc=$drop_rc) — nothing was deleted, prune not run" 2
 	# --max-repack-size 0 keeps prune from repacking partially-used packs, which
 	# would mean downloading them out of Deep Archive. Delete-only reclaim.
-	"$RESTIC" prune --max-repack-size 0 2>&1 | tee -a "$LOG" || die "prune failed" 2
+	drop_out=$("$RESTIC" prune --max-repack-size 0 2>&1); drop_rc=$?
+	printf '%s\n' "$drop_out" | tee -a "$LOG"
+	[ "$drop_rc" = 0 ] || die "prune after forgetting $DROP_ID failed (rc=$drop_rc) — the snapshot is gone, its data may not be" 2
 	log "  dropped $DROP_ID"
 	exit 0
 fi
