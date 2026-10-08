@@ -126,6 +126,27 @@ tail -50 /var/log/tank-offsite.log      # the full story
 - A syntax error in `targets` refuses the whole run, not just the new line.
 - A scrub or resilver in progress defers the run to the next night.
 
+### When a read-back check fails
+
+After each upload, a few of the changed files are restored and hashed against
+the source. A failure alerts with one of two headlines:
+
+- **`READ-BACK could not RESTORE`** — `restic restore` itself errored, so
+  nothing was compared. restic's own message is in the log, indented under
+  `read-back: FAILED to restore`.
+- **`READ-BACK MISMATCH`** — a file came back with different bytes. Treat the
+  repository as suspect.
+
+Either one leaves `/var/lib/tank-offsite/<target>.unverified` behind, and the
+target reports failed every night until a later snapshot passes its read-back.
+A night with nothing new does **not** clear it — there is nothing new to check,
+and by then the failed snapshot's packs are usually in Deep Archive. Once the
+restore test below has satisfied you, clear it by hand:
+
+```sh
+sudo rm /var/lib/tank-offsite/<target>.unverified
+```
+
 ### Restore, and verify
 
 ```sh

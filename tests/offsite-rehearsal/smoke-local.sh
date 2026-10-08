@@ -54,9 +54,11 @@ STUB_SCAN=
 STUB_MOUNTED=yes
 STUB_SCLASS_BAD=
 STUB_AWS=
+STUB_RESTORE_FAIL=
+STUB_BACKUP_UNCHANGED=
 reset_stubs() {
 	STUB_HEALTH=ONLINE; STUB_SCAN=; STUB_MOUNTED=yes
-	STUB_SCLASS_BAD=; STUB_AWS=
+	STUB_SCLASS_BAD=; STUB_AWS=; STUB_RESTORE_FAIL=; STUB_BACKUP_UNCHANGED=
 }
 
 PASS=0
@@ -141,7 +143,27 @@ esac
 exit 0
 STUB
 
-chmod +x "$T/bin/zpool" "$T/bin/zfs" "$T/bin/aws"
+# --- wrapper restic: the real one, with two failures it will not do on request ---
+# STUB_RESTORE_FAIL: the read-back's restore step fails, as on 2026-10-05.
+# STUB_BACKUP_UNCHANGED: a backup that finds nothing new. Real restic decides
+# that here only by luck: it records the metadata of every ancestor of the
+# backed-up path, and /tmp and $T are touched between runs by other processes
+# and by this suite. A --dry-run prints no "snapshot ... saved" line, which is
+# exactly what the script reads as unchanged. On the real pool /Volumes/tank
+# does not churn, and 2026-10-07 was genuinely unchanged.
+cat >"$T/bin/restic" <<STUB
+#!/bin/sh
+if [ "\$1" = restore ] && [ -n "\${STUB_RESTORE_FAIL:-}" ]; then
+	echo "Fatal: stub restore failure for the smoke test" >&2
+	exit 1
+fi
+if [ "\$1" = backup ] && [ -n "\${STUB_BACKUP_UNCHANGED:-}" ]; then
+	exec "$RESTIC_BIN" "\$@" --dry-run
+fi
+exec "$RESTIC_BIN" "\$@"
+STUB
+
+chmod +x "$T/bin/zpool" "$T/bin/zfs" "$T/bin/aws" "$T/bin/restic"
 
 # An EMPTY zed.rc, so notify() takes its "no channel set" branch and logs
 # instead of posting. Pointing a test suite at the live Discord webhook would
@@ -173,7 +195,9 @@ run_offsite() {
 	env \
 		TANK_OFFSITE_ZFS="$T/bin/zfs" \
 		TANK_OFFSITE_ZPOOL="$T/bin/zpool" \
-		TANK_OFFSITE_RESTIC="$RESTIC_BIN" \
+		TANK_OFFSITE_RESTIC="$T/bin/restic" \
+		STUB_RESTORE_FAIL="${STUB_RESTORE_FAIL:-}" \
+		STUB_BACKUP_UNCHANGED="${STUB_BACKUP_UNCHANGED:-}" \
 		TANK_OFFSITE_MOUNT_ROOT="$T/mnt" \
 		TANK_OFFSITE_CONF_DIR="$T/conf" \
 		TANK_OFFSITE_STATE_DIR="$T/state" \
@@ -523,6 +547,43 @@ run_offsite --force --only documents; rc=$?
 check "exit code unaffected" "$rc" 0
 grep -q 'storage-class check: .* not found — SKIPPED' "$T/log" && ok "says it could not check" || bad "says it could not check"
 grep -q 'storage-class:\[skipped\]' "$T/log" && ok "skip is visible in the verdict, not silent" || bad "skip is visible in the verdict, not silent"
+
+echo
+echo "22. A restore that fails is reported as such, with restic's own error"
+reset_stubs
+dd if=/dev/urandom of="$T/mnt/media/concerts/encore.bin" bs=64k count=4 2>/dev/null
+STUB_RESTORE_FAIL=1
+: >"$T/log"
+run_offsite --force --only media/concerts; rc=$?
+check "exit code reports the failure" "$rc" 2
+grep -q 'read-back: FAILED to restore' "$T/log" && ok "names the file it could not restore" || bad "names the file it could not restore"
+grep -q 'restic: Fatal: stub restore failure' "$T/log" && ok "restic's stderr reaches the log" || bad "restic's stderr reaches the log"
+grep -q 'media/concerts: READ-BACK could not RESTORE' "$T/log" && ok "alert says restore failed" || bad "alert says restore failed"
+grep -q 'MISMATCH' "$T/log" && bad "alert does not call it a mismatch" || ok "alert does not call it a mismatch"
+check "marked unverified" "$(ls "$T/state" | grep -c '^media_concerts.unverified$')" 1
+
+echo
+echo "23. ...and an unchanged run afterwards does NOT clear it"
+# 2026-10-07: media/zo had failed its read-back, the next night found nothing
+# new, wrote state, and the target went quiet for 30 days unverified.
+reset_stubs
+STUB_BACKUP_UNCHANGED=1
+: >"$T/log"
+run_offsite --force --only media/concerts; rc=$?
+check "exit code still reports the failure" "$rc" 2
+grep -q 'nothing changed' "$T/log" && ok "really was an unchanged run" || bad "really was an unchanged run"
+grep -q 'media/concerts: STILL UNVERIFIED' "$T/log" && ok "says it is still unverified" || bad "says it is still unverified"
+grep -q 'failed:\[ media/concerts\]' "$T/log" && ok "verdict keeps it failed" || bad "verdict keeps it failed"
+
+echo
+echo "24. ...until a new snapshot passes its read-back"
+reset_stubs
+dd if=/dev/urandom of="$T/mnt/media/concerts/encore.bin" bs=64k count=5 2>/dev/null
+: >"$T/log"
+run_offsite --force --only media/concerts; rc=$?
+check "exit code" "$rc" 0
+grep -q 'media/concerts: read-back check passed' "$T/log" && ok "read-back passed" || bad "read-back passed"
+check "marker cleared" "$(ls "$T/state" | grep -c '^media_concerts.unverified$')" 0
 
 echo
 echo "================================================"

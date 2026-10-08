@@ -532,6 +532,13 @@ read_back_check() {
 	rb_done=0
 	rb_bytes=0
 	rb_fail=0
+	# Globals, read by the caller to word the alert. "Could not restore" and
+	# "restored but different" are different failures: the first can be the
+	# restore step itself, the second is the repository holding wrong bytes.
+	# Telling both "does not match the source" sent you looking for corruption
+	# that restic check had just ruled out.
+	RB_UNRESTORED=0
+	RB_MISMATCHED=0
 
 	# Fed by REDIRECTION, not by a pipe. `cmd | while read` runs the loop in a
 	# subshell, so rb_fail and rb_bytes would be discarded at `done` and this
@@ -544,10 +551,16 @@ read_back_check() {
 		rb_bytes=$((rb_bytes + rb_size))
 		[ "$rb_bytes" -le "$VERIFY_MAX_BYTES" ] || break
 
+		# stderr is KEPT. It used to go to /dev/null, and on 2026-10-05 two
+		# files failed to restore two nights running with nothing in the log
+		# to say why — the check could only report that it failed.
 		if ! "$RESTIC" restore "$rb_new" --target "$rb_tmp" \
-			--include "$rb_path" >/dev/null 2>&1; then
+			--include "$rb_path" >/dev/null 2>"$rb_tmp/.err"; then
 			log "  read-back: FAILED to restore $rb_path"
+			grep -v '^[[:space:]]*$' "$rb_tmp/.err" | tail -5 |
+				while IFS= read -r rb_line; do log "      restic: $rb_line"; done
 			rb_fail=1
+			RB_UNRESTORED=$((RB_UNRESTORED + 1))
 			continue
 		fi
 		rb_src=$(shasum -a 256 "$rb_path" 2>/dev/null | awk '{print $1}')
@@ -557,6 +570,7 @@ read_back_check() {
 		else
 			log "  read-back: MISMATCH $rb_path (src=$rb_src got=${rb_got:-none})"
 			rb_fail=1
+			RB_MISMATCHED=$((RB_MISMATCHED + 1))
 		fi
 
 		rb_done=$((rb_done + 1))
@@ -636,6 +650,9 @@ while read -r TPATH INTERVAL_DAYS; do
 	DSET=${TPATH%%/*}
 	# Slashes cannot go in a filename, so media/concerts becomes media_concerts.
 	STATE=$STATE_DIR/$(printf '%s' "$TPATH" | tr / _).last
+	# Present while the newest snapshot failed its read-back. See the
+	# "nothing changed" branch for why that has to outlive the run.
+	UNVERIFIED=$STATE_DIR/$(printf '%s' "$TPATH" | tr / _).unverified
 	INTERVAL=$((INTERVAL_DAYS * 86400))
 	# Half a run-period of slack, so a fire landing seconds early does not skip
 	# a whole interval. Half a day cannot let a target fire twice in one run.
@@ -665,7 +682,11 @@ while read -r TPATH INTERVAL_DAYS; do
 		continue
 	fi
 
-	log "  $TPATH: due (last run ${AGE}s ago) — backing up $MOUNT_ROOT/$TPATH"
+	if [ "$LAST_RUN" = 0 ]; then
+		log "  $TPATH: due (never run) — backing up $MOUNT_ROOT/$TPATH"
+	else
+		log "  $TPATH: due (last run ${AGE}s ago) — backing up $MOUNT_ROOT/$TPATH"
+	fi
 	if ! check_mounted "$DSET" "$TPATH"; then
 		FAILED="$FAILED $TPATH"
 		continue
@@ -793,6 +814,17 @@ two runs from writing at once."
 	NEW=$(printf '%s\n' "$OUT" | awk '/snapshot [0-9a-f]+ saved/ { print $2; exit }')
 	if [ -z "$NEW" ]; then
 		log "  $TPATH: nothing changed — no snapshot recorded"
+		# An unchanged run proves nothing about the last snapshot, so it must
+		# not stand in for a passed read-back. On 2026-10-07 it did: media/zo
+		# had failed two nights running, the third found nothing new, wrote
+		# state, and the target went quiet for 30 days unverified. By then its
+		# packs are in Deep Archive and the free check cannot reach them, so
+		# this does not retry it. It stays failed until a person clears it.
+		if [ -f "$UNVERIFIED" ]; then
+			log "  $TPATH: STILL UNVERIFIED — snapshot $(awk '{print $2; exit}' "$UNVERIFIED") failed its read-back and nothing has changed since. After the full restore test, clear it with: sudo rm $UNVERIFIED"
+			FAILED="$FAILED $TPATH"
+			continue
+		fi
 		echo "$(now) $PARENT" >"$STATE"
 		RAN="$RAN $TPATH"
 		continue
@@ -801,11 +833,20 @@ two runs from writing at once."
 	log "  $TPATH: snapshot $NEW saved"
 	if read_back_check "$TPATH" "$PARENT" "$NEW"; then
 		log "  $TPATH: read-back check passed"
+		rm -f "$UNVERIFIED"
 	else
-		alert "$TPATH: READ-BACK CHECK FAILED on snapshot $NEW." \
-			"The upload reported success but a file restored from it does not
+		echo "$(now) $NEW" >"$UNVERIFIED"
+		if [ "$RB_MISMATCHED" -gt 0 ]; then
+			alert "$TPATH: READ-BACK MISMATCH on snapshot $NEW." \
+				"The upload reported success but a file restored from it does not
 match the source. Treat the repository as suspect and run the full restore
 test before relying on it. Details in $LOG."
+		else
+			alert "$TPATH: READ-BACK could not RESTORE from snapshot $NEW." \
+				"restic could not restore $RB_UNRESTORED file(s) from it, so nothing
+was compared. restic's own error is in $LOG under this run. Until it
+is explained, run the full restore test before relying on this target."
+		fi
 		FAILED="$FAILED $TPATH"
 		continue
 	fi
