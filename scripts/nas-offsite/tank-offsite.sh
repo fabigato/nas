@@ -600,8 +600,17 @@ read_back_check() {
 		# stderr is KEPT. It used to go to /dev/null, and on 2026-10-05 two
 		# files failed to restore two nights running with nothing in the log
 		# to say why — the check could only report that it failed.
+		#
+		# --exclude-xattr '*': this check compares CONTENT, and putting xattrs
+		# back is a separate step that can fail on its own. Once stderr was
+		# kept it said exactly that, on 2026-10-09: restic wrote the file, then
+		# macOS refused com.apple.system.Security (the ACL) on the temp copy
+		# with "operation not permitted", restic exited 1, and the content
+		# was never compared. Three nights of "READ-BACK FAILED" on a good
+		# repository.
 		if ! "$RESTIC" restore "$rb_new" --target "$rb_tmp" \
-			--include "$rb_path" >/dev/null 2>"$rb_tmp/.err"; then
+			--include "$rb_path" --exclude-xattr '*' \
+			>/dev/null 2>"$rb_tmp/.err"; then
 			log "  read-back: FAILED to restore $rb_path"
 			grep -v '^[[:space:]]*$' "$rb_tmp/.err" | tail -5 |
 				while IFS= read -r rb_line; do log "      restic: $rb_line"; done

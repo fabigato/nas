@@ -158,6 +158,16 @@ if [ "\$1" = restore ] && [ -n "\${STUB_RESTORE_FAIL:-}" ]; then
 	echo "Fatal: stub restore failure for the smoke test" >&2
 	exit 1
 fi
+# A restore that tries to put xattrs back fails, as com.apple.system.Security
+# did on tank on 2026-10-09. Always on: the read-back must never ask for them.
+if [ "\$1" = restore ]; then
+	case " \$* " in
+	*" --exclude-xattr "*) ;;
+	*)	echo "ignoring error for x: xattr.LSet x com.apple.system.Security: operation not permitted (stub)" >&2
+		echo "Fatal: There were 1 errors" >&2
+		exit 1 ;;
+	esac
+fi
 # STUB_FORGET_FAIL: forget refused, as the backup credential is by S3.
 if [ "\$1" = forget ] && [ -n "\${STUB_FORGET_FAIL:-}" ]; then
 	echo "Remove(<snapshot/x>) failed: AccessDenied (stub)" >&2
