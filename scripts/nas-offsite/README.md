@@ -71,7 +71,8 @@ stages the three config files under `./staged/` with mode 0600 and prints a
 | Bucket | `tank-offsite-<random>` in `eu-central-1` (Frankfurt) |
 | Versioning | on — a delete leaves a recoverable previous version |
 | Public access | blocked, all four settings |
-| Lifecycle | `data/` → Deep Archive after 7 days; noncurrent versions expire at 180 days; incomplete uploads aborted after 7 days |
+| Lifecycle | noncurrent versions expire at 180 days; incomplete uploads aborted after 7 days. **No storage-class transition** — see below |
+| Storage class | set by restic at upload (`-o s3.storage-class=DEEP_ARCHIVE`): content packs go straight to Deep Archive; tree packs, index, snapshots, keys and config stay in Standard |
 | IAM user 1 | `tank-offsite-backup` — append-only. Can write and read, can only delete inside `locks/`. Its key lives on the Mac. |
 | IAM user 2 | `tank-offsite-prune` — can delete objects, but **not** object *versions*. Its key lives only in `pass`. |
 | restic repo | initialised at the bucket root, repository format 2 |
@@ -126,26 +127,45 @@ tail -50 /var/log/tank-offsite.log      # the full story
 - A syntax error in `targets` refuses the whole run, not just the new line.
 - A scrub or resilver in progress defers the run to the next night.
 
-### When a read-back check fails
+### Why restic picks the storage class, not a lifecycle rule
 
-After each upload, a few of the changed files are restored and hashed against
-the source. A failure alerts with one of two headlines:
+restic keeps two kinds of pack under `data/`: **content** (file bytes) and
+**trees** (each snapshot's directory structure). Trees are read by `check`,
+`prune`, `ls`, `find`, by `backup` to skip unchanged files, and by every
+restore. Content is read only by a restore.
 
-- **`READ-BACK could not RESTORE`** — `restic restore` itself errored, so
-  nothing was compared. restic's own message is in the log, indented under
-  `read-back: FAILED to restore`.
-- **`READ-BACK MISMATCH`** — a file came back with different bytes. Treat the
-  repository as suspect.
+The first design moved all of `data/` to Deep Archive after 7 days. On
+2026-10-10, the first night the seed's trees had gone cold, `restic check`
+failed on every snapshot with *"The operation is not valid for the object's
+storage class"*. S3 cannot tell a tree pack from a content pack, so no
+lifecycle filter can fix that. restic can: with an archive class it applies the
+class to content packs only (`useStorageClass` in restic's `s3.go`, checked
+against 0.19.1).
 
-Either one leaves `/var/lib/tank-offsite/<target>.unverified` behind, and the
-target reports failed every night until a later snapshot passes its read-back.
-A night with nothing new does **not** clear it — there is nothing new to check,
-and by then the failed snapshot's packs are usually in Deep Archive. Once the
-restore test below has satisfied you, clear it by hand:
+The price was the old read-back check, which restored a few just-uploaded files
+for free while their packs were still warm. Content is now cold from the moment
+it lands, so that proof comes from the quarterly restore test instead.
+
+### When the storage-class check alerts
+
+Every run lists `data/`, reads restic's index to learn which packs are trees,
+and alerts if any tree pack is out of Standard. Content left in Standard is
+only logged: it costs money, it breaks nothing.
 
 ```sh
-sudo rm /var/lib/tank-offsite/<target>.unverified
+pass show nas/offsite-prune-aws | sudo /usr/local/sbin/tank-offsite.sh --fix-classes --dry-run
+pass show nas/offsite-prune-aws | sudo /usr/local/sbin/tank-offsite.sh --fix-classes
 ```
+
+It requests a Standard-tier thaw for each cold tree pack and copies warm content
+packs to Deep Archive. It exits **3** while thaws are pending — run it again in
+~12 h and it copies the thawed trees back to Standard, then exits 0. It needs the
+prune credential, because the backup credential cannot issue a Glacier restore,
+and it refuses to move anything if it cannot read restic's whole index, because
+without it a tree pack looks like content.
+
+Each copy leaves the replaced object as a noncurrent version for 180 days, so a
+mistake is recoverable, and that copy is billed until then.
 
 ### Restore, and verify
 
@@ -156,6 +176,7 @@ export RESTIC_PASSWORD_FILE=/etc/tank-offsite/repo.pass
 export RESTIC_CACHE_DIR=/var/cache/tank-offsite
 
 restic snapshots                                            # what is there
+# content is in Deep Archive: thaw what the restore will read first (see below)
 restic restore latest --tag documents --target /tmp/restoretest
 diff -r /tmp/restoretest/Volumes/tank/documents /Volumes/tank/documents
 restic check --read-data-subset=2%                          # re-verify real packs
@@ -165,15 +186,15 @@ restic unlock                                               # if "already locked
 `diff` listing the excluded cruft as present only in the source is correct, not
 a discrepancy.
 
-**`--read-data-subset` is only cheap while the packs are still in Standard — the
-first 7 days after upload.** It is the one check that proves the *stored bytes*
-are the bytes you sent, rather than that the bookkeeping is self-consistent.
-After the lifecycle transition it needs a Glacier restore first and a 12-hour
-wait, which is why the quarterly restore test has to be a two-phase job.
+**Restoring or `--read-data-subset` needs a Glacier thaw first.** Content packs
+are in Deep Archive from the moment they are uploaded, so the quarterly restore
+test is a two-phase job: thaw what it will read, wait ~12 h, then restore. It is
+the one check that proves the *stored bytes* are the bytes you sent, rather than
+that the bookkeeping is self-consistent.
 
-Plain `restic check`, without `--read-data`, is metadata-only and runs after
-every backup. It works fine against Deep Archive because it never touches
-`data/`.
+Plain `restic check`, without `--read-data`, runs after every backup. It reads
+the index, the snapshots and every tree pack, all of which stay in Standard, and
+never touches content.
 
 ### Restore when the Mac is gone — the actual disaster
 
@@ -232,10 +253,12 @@ restic restore <id> --target /recovered
 and about two days wall-clock — 48 h of thaw plus 15 h of download. The money is
 not the problem; assuming it is a two-hour job is.
 
-**You cannot cheaply restore just a few files.** Which packs hold a given file is
-not something you can read off the outside of the bucket, so budget for thawing
-all of `data/`. This is the main thing Deep Archive costs you, and it is the
-right trade for a copy you hope never to read.
+**A few files need only their own packs thawed — in principle.** The trees are in
+Standard, so `restic snapshots`, `ls` and `find` work with nothing thawed, and
+restic knows which content packs a file needs. restic's experimental
+`s3-restore` feature (`RESTIC_FEATURES=s3-restore restic restore -o
+s3.enable-restore=1 ...`) issues those thaws itself. **UNREHEARSED** — until it
+has been run once, budget a full restore as thawing all of `data/`.
 
 ### Drop a snapshot you know is junk
 

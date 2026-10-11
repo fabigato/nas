@@ -61,19 +61,34 @@
 # datasets are separated by --tag and by path, which is all `forget --group-by
 # paths` needs to apply different retention to each.
 #
-# 5. THE READ-BACK CHECK EXISTS BECAUSE `restic backup` EXITING 0 PROVES THE
-#    UPLOAD, NOT THE ARCHIVE.
+# 5. RESTIC CHOOSES THE STORAGE CLASS, NOT A LIFECYCLE RULE, BECAUSE ONLY
+#    RESTIC KNOWS WHICH PACKS ARE TREES.
 #
-# After a run that sent something, this restores a few of the files that
-# CHANGED THIS RUN and compares checksums against the source. "Changed this
-# run" is load-bearing: those packs were written minutes ago, so the lifecycle
-# rule has not moved them to Deep Archive yet and reading them back is instant,
-# free, and needs no Glacier restore. An unchanged file's chunks live in old,
-# cold packs and could not be read without a 12-hour round trip.
+# restic keeps two kinds of pack under data/: content (file bytes) and trees
+# (the directory structure of every snapshot). Trees are read by EVERYTHING —
+# check, prune, ls, find, the parent comparison in backup, and every restore,
+# even of one file. Content is read only by a restore.
 #
-# It is a spot check, not a verification. `restic check --read-data` — which
-# re-downloads and re-verifies every chunk — cannot be run against Deep Archive
-# at all. That gap is real and is why the quarterly restore test exists.
+# The first design sent all of data/ to Deep Archive after 7 days with a
+# lifecycle rule, on the belief that nothing under data/ was read routinely.
+# The tree packs proved it wrong: on 2026-10-10, the first night the seed's
+# trees had gone cold, `restic check` failed on every snapshot with "The
+# operation is not valid for the object's storage class". From the outside of
+# the bucket a tree pack and a content pack are indistinguishable, so no
+# lifecycle filter can tell them apart.
+#
+# restic can. With -o s3.storage-class=DEEP_ARCHIVE it puts content packs in
+# Deep Archive at upload and everything else — trees included — in Standard.
+# Read from restic 0.19.1's source, not assumed: useStorageClass applies an
+# archive class only to `PackFile && !IsMetadata`. `restic options` does not
+# list DEEP_ARCHIVE among the values, which is why this needed checking.
+#
+# WHAT THAT COST: the free read-back check. It restored a few of the files a
+# run had just changed, which worked because their packs stayed in Standard
+# for the 7 days before the transition. Content now goes cold at upload, so
+# there is nothing warm to read back. `restic backup` exiting 0 proves the
+# upload, not the archive, and that gap is real: it is covered by the
+# quarterly restore test (README), which thaws what it reads.
 #
 # 6. NOTIFICATIONS: FAILURES ALWAYS, PLUS A HEARTBEAT ON ITS OWN CLOCK.
 #
@@ -104,12 +119,17 @@
 #     sudo sh tank-offsite.sh --drop <id>   # forget one snapshot you know is
 #                                           # junk, then reclaim it. Needs the
 #                                           # prune credential on stdin.
+#   pass show nas/offsite-prune-aws |
+#     sudo sh tank-offsite.sh --fix-classes # put every pack in the class
+#                                           # DESIGN 5 says it belongs in.
+#                                           # Re-run until it says done.
 #
 # Exit codes:
 #   0  ran, or correctly had nothing to do
 #   1  refused to start (pool, mount, config, tooling)
 #   2  a backup or check failed, or a snapshot is incomplete — READ THE LOG
-#   3  deferred (a scrub is running, or another run still has the lock)
+#   3  deferred (a scrub is running, or another run still has the lock), or
+#      --fix-classes is waiting on a Glacier thaw — run it again later
 
 set -u
 
@@ -126,6 +146,8 @@ RESTIC=${TANK_OFFSITE_RESTIC:-/opt/homebrew/bin/restic}
 # Only used for the storage-class invariant below. restic cannot report an
 # object's storage class, so this is the one thing that needs the AWS CLI.
 AWS_CLI=${TANK_OFFSITE_AWS:-/opt/homebrew/bin/aws}
+# Reads restic's index to tell tree packs from content packs. Ships with macOS.
+JQ=${TANK_OFFSITE_JQ:-/usr/bin/jq}
 
 POOL=${TANK_OFFSITE_POOL:-tank}
 MOUNT_ROOT=${TANK_OFFSITE_MOUNT_ROOT:-/Volumes/tank}
@@ -163,11 +185,9 @@ LIMIT_UP=${TANK_OFFSITE_LIMIT_UP:-2500}
 # which is the right trade for an archive nobody browses casually.
 PACK_SIZE=${TANK_OFFSITE_PACK_SIZE:-64}
 
-# How many changed files the read-back check pulls, and the total it will pull.
-# Bounded because this runs unattended: a monthly run that decides to re-download
-# 40 GB to "verify" it has become the problem rather than the check.
-VERIFY_FILES=${TANK_OFFSITE_VERIFY_FILES:-3}
-VERIFY_MAX_BYTES=${TANK_OFFSITE_VERIFY_MAX_BYTES:-536870912}
+# Where content packs go at upload. See DESIGN 5: restic applies this to
+# content only and keeps trees in Standard, which is the whole point.
+STORAGE_CLASS=${TANK_OFFSITE_STORAGE_CLASS:-DEEP_ARCHIVE}
 
 # A run holds this for its whole duration so the next nightly fire defers
 # instead of colliding. /var/run is cleared at boot, which disposes of a lock
@@ -195,6 +215,7 @@ while [ $# -gt 0 ]; do
 	--force) FORCE=1 ;;
 	--seed) SEED=1; FORCE=1 ;;
 	--list) MODE=list ;;
+	--fix-classes) MODE=fix-classes ;;
 	--only)
 		shift
 		[ $# -gt 0 ] || { echo "--only needs a dataset name" >&2; exit 1; }
@@ -305,6 +326,61 @@ die() {
 }
 
 now() { date '+%s'; }
+
+# Every pack id holding tree blobs, one per line, read from restic's index.
+# restic never mixes trees and content in one pack. Returns 1 if ANY index file
+# could not be read: a partial list would make a caller treat the missing tree
+# packs as content, and --fix-classes would then send them to Deep Archive.
+tree_packs() {
+	tp_ids=$("$RESTIC" list index 2>/dev/null) || return 1
+	[ -n "$tp_ids" ] || return 1
+	for tp_id in $tp_ids; do
+		# Captured, not piped: in `restic cat | jq` the status is jq's, and jq
+		# succeeds on empty input. An index holding only content packs is
+		# normal and prints nothing, so emptiness cannot be the error signal.
+		tp_json=$("$RESTIC" cat index "$tp_id" 2>/dev/null) || return 1
+		printf '%s' "$tp_json" |
+			"$JQ" -r '.packs[] | select(any(.blobs[]; .type == "tree")) | .id' ||
+			return 1
+	done
+}
+
+# Joins tree_packs output ($1, a file) with a data/ listing on stdin
+# (key<TAB>class per line) and prints what is in the wrong class:
+#   tree<TAB>key       a tree pack out of Standard — breaks check, prune, restore
+#   content<TAB>key    a content pack still in Standard — costs money, breaks nothing
+misfiled_packs() {
+	awk -F'\t' 'NR == FNR { tree[$1] = 1; next }
+		$1 ~ /^data\// {
+			n = split($1, p, "/")
+			if (p[n] in tree) { if ($2 != "STANDARD") print "tree\t" $1 }
+			else if ($2 == "STANDARD") print "content\t" $1
+		}' "$1" -
+}
+
+# key<TAB>class for every object under data/. The CLI follows pagination itself.
+list_data_classes() {
+	"$AWS_CLI" s3api list-objects-v2 --bucket "$BUCKET" --prefix data/ \
+		--query 'Contents[].[Key,StorageClass]' --output text
+}
+
+# The prune credential, read from stdin for one command and never written down.
+# $1 = the command line to show in the refusal, e.g. "--drop 1a2b3c4d".
+take_prune_credential() {
+	[ -t 0 ] && die "${1%% *} needs the prune credential on stdin:
+  pass show nas/offsite-prune-aws | sudo $0 $1"
+	tpc_creds=$(cat)
+	tpc_key=$(printf '%s\n' "$tpc_creds" | awk -F= '/^AWS_ACCESS_KEY_ID=/ { print $2; exit }')
+	tpc_secret=$(printf '%s\n' "$tpc_creds" | awk -F= '/^AWS_SECRET_ACCESS_KEY=/ { print $2; exit }')
+	unset tpc_creds
+	[ -n "$tpc_key" ] && [ -n "$tpc_secret" ] ||
+		die "${1%% *}: stdin did not hold AWS_ACCESS_KEY_ID= and AWS_SECRET_ACCESS_KEY= lines — nothing done"
+	[ "$tpc_key" != "$AWS_ACCESS_KEY_ID" ] ||
+		die "${1%% *}: that is the backup credential, which cannot delete or thaw — pipe in nas/offsite-prune-aws"
+	AWS_ACCESS_KEY_ID=$tpc_key
+	AWS_SECRET_ACCESS_KEY=$tpc_secret
+	export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+}
 
 # ---------------------------------------------------------------- preflight
 
@@ -503,19 +579,7 @@ if [ "$MODE" = drop ]; then
 	# it. Deleting needs tank-offsite-prune, whose key lives only in `pass` and
 	# is piped in for this one command — never written here. The first --drop
 	# ever run (2026-10-09) used the backup credential and got AccessDenied.
-	[ -t 0 ] && die "--drop needs the prune credential on stdin:
-  pass show nas/offsite-prune-aws | sudo $0 --drop $DROP_ID"
-	drop_creds=$(cat)
-	drop_key=$(printf '%s\n' "$drop_creds" | awk -F= '/^AWS_ACCESS_KEY_ID=/ { print $2; exit }')
-	drop_secret=$(printf '%s\n' "$drop_creds" | awk -F= '/^AWS_SECRET_ACCESS_KEY=/ { print $2; exit }')
-	unset drop_creds
-	[ -n "$drop_key" ] && [ -n "$drop_secret" ] ||
-		die "--drop: stdin did not hold AWS_ACCESS_KEY_ID= and AWS_SECRET_ACCESS_KEY= lines — nothing done"
-	[ "$drop_key" != "$AWS_ACCESS_KEY_ID" ] ||
-		die "--drop: that is the backup credential, which cannot delete — pipe in nas/offsite-prune-aws"
-	AWS_ACCESS_KEY_ID=$drop_key
-	AWS_SECRET_ACCESS_KEY=$drop_secret
-	export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+	take_prune_credential "--drop $DROP_ID"
 
 	# Captured, not piped into tee. `restic forget | tee` reports tee's exit
 	# status, so on 2026-10-09 an AccessDenied forget was followed by a prune
@@ -524,118 +588,139 @@ if [ "$MODE" = drop ]; then
 	printf '%s\n' "$drop_out" | tee -a "$LOG"
 	[ "$drop_rc" = 0 ] || die "forget $DROP_ID failed (rc=$drop_rc) — nothing was deleted, prune not run" 2
 	# --max-repack-size 0 keeps prune from repacking partially-used packs, which
-	# would mean downloading them out of Deep Archive. Delete-only reclaim.
-	drop_out=$("$RESTIC" prune --max-repack-size 0 2>&1); drop_rc=$?
+	# would mean downloading them out of Deep Archive. Delete-only reclaim. The
+	# storage class is passed anyway, so that if a future prune does write a
+	# pack, it lands where an upload would have put it (DESIGN 5).
+	drop_out=$("$RESTIC" prune -o s3.storage-class="$STORAGE_CLASS" --max-repack-size 0 2>&1); drop_rc=$?
 	printf '%s\n' "$drop_out" | tee -a "$LOG"
 	[ "$drop_rc" = 0 ] || die "prune after forgetting $DROP_ID failed (rc=$drop_rc) — the snapshot is gone, its data may not be" 2
 	log "  dropped $DROP_ID"
 	exit 0
 fi
 
-# ------------------------------------------------------------------- backup
+# ------------------------------------------------------------- fix-classes
 
-# Restore a handful of the files this run changed and checksum them against the
-# source. See DESIGN 5 for why only changed files, and why this is a spot check.
-# $1 = dataset, $2 = parent snapshot id or empty, $3 = new snapshot id
-read_back_check() {
-	rb_ds=$1   # relative path, e.g. my_media or media/concerts
-	rb_parent=$2
-	rb_new=$3
+# Puts every pack in the class DESIGN 5 says it belongs in, and is safe to run
+# at any time: it only moves what is in the wrong place.
+#
+#   tree pack, cold     ask S3 to thaw it (Standard tier, <= 12 h), and on a
+#                       later run, once thawed, copy it over itself as STANDARD
+#   content, Standard   copy it over itself as DEEP_ARCHIVE
+#
+# Written for the 2026-10-10 repair, when the lifecycle rule had already sent
+# the seed's trees cold and left the last week's content warm. Kept because the
+# nightly invariant below names it as the fix if that ever happens again.
+#
+# Needs the prune credential: the backup credential cannot issue a Glacier
+# restore. Bucket versioning keeps the replaced copy as a noncurrent version for
+# 180 days, so a mistake here is recoverable — and costs that copy's storage
+# for those 180 days.
+if [ "$MODE" = fix-classes ]; then
+	[ -n "$BUCKET" ] || die "--fix-classes: no OFFSITE_BUCKET in $CONF_DIR/env"
+	[ -x "$AWS_CLI" ] || die "--fix-classes: $AWS_CLI not found"
+	[ -x "$JQ" ] || die "--fix-classes: $JQ not found"
+	# A dry run only lists and reads, which the backup credential can do.
+	[ "$DRY_RUN" = 1 ] || take_prune_credential --fix-classes
 
-	[ -n "$rb_new" ] || { log "  read-back: no new snapshot id — skipped"; return 0; }
+	FC_TMP=$(mktemp -d /tmp/tank-offsite-fix.XXXXXX) || die "cannot make a temp dir"
+	trap 'rm -rf "$FC_TMP"; release_lock' EXIT INT TERM
+	fc_say() { echo "$*"; log "  $*"; }
 
-	if [ -z "$rb_parent" ]; then
-		# First run for this dataset: every chunk in the snapshot was uploaded
-		# minutes ago, so any file in it is warm. Take the first few.
-		#
-		# THE LIST COMES FROM THE SNAPSHOT, NOT FROM `find` ON THE SOURCE.
-		# An earlier version walked the source tree, which also yields the
-		# files we deliberately EXCLUDED — so it would pick a .DS_Store,
-		# correctly fail to restore something that was never backed up, and
-		# report MISMATCH on a perfectly good repository. On this pool that is
-		# not a corner case: my_media is full of .DS_Store, so the FIRST real
-		# run would have alerted "treat the repository as suspect". An alarm
-		# that cries wolf on day one trains you to ignore the channel, which
-		# costs more than having no check at all. Caught by smoke-local.sh.
-		#
-		# The snapshot is the only authority on what was actually backed up.
-		rb_cands=$("$RESTIC" ls "$rb_new" 2>/dev/null | grep '^/' | head -40)
-	else
-		# `restic diff` marks added paths with + and modified ones with M.
-		# Those are the chunks written minutes ago, still in Standard, which is
-		# the entire reason this check is free. sed rather than awk on $1 so a
-		# path containing runs of spaces survives intact.
-		rb_cands=$("$RESTIC" diff "$rb_parent" "$rb_new" 2>/dev/null |
-			sed -n 's/^[+M][[:space:]]*//p' | head -40)
+	# The one refusal that protects the repository from this command. Without
+	# the complete list of tree packs, a tree pack is indistinguishable from
+	# content and would be sent to Deep Archive — the very damage being fixed.
+	if ! tree_packs >"$FC_TMP/trees" || [ ! -s "$FC_TMP/trees" ]; then
+		die "--fix-classes: could not read restic's index, so tree packs cannot be told from content — nothing done" 2
 	fi
+	list_data_classes >"$FC_TMP/objects" 2>"$FC_TMP/err" ||
+		die "--fix-classes: listing data/ failed — $(tail -1 "$FC_TMP/err")" 2
+	misfiled_packs "$FC_TMP/trees" <"$FC_TMP/objects" >"$FC_TMP/plan"
 
-	if [ -z "$rb_cands" ]; then
-		log "  read-back: nothing changed to check"
-		return 0
-	fi
+	fc_say "$(wc -l <"$FC_TMP/trees" | tr -d ' ') tree pack(s) in the index; $(grep -c '^tree' "$FC_TMP/plan") cold, $(grep -c '^content' "$FC_TMP/plan") content pack(s) still in Standard"
 
-	rb_tmp=$(mktemp -d /tmp/tank-offsite-verify.XXXXXX) || return 0
-	rb_done=0
-	rb_bytes=0
-	rb_fail=0
-	# Globals, read by the caller to word the alert. "Could not restore" and
-	# "restored but different" are different failures: the first can be the
-	# restore step itself, the second is the repository holding wrong bytes.
-	# Telling both "does not match the source" sent you looking for corruption
-	# that restic check had just ruled out.
-	RB_UNRESTORED=0
-	RB_MISMATCHED=0
-
-	# Fed by REDIRECTION, not by a pipe. `cmd | while read` runs the loop in a
-	# subshell, so rb_fail and rb_bytes would be discarded at `done` and this
-	# function would always return success. Redirection keeps it in this shell.
-	printf '%s\n' "$rb_cands" >"$rb_tmp/.cands"
-	while IFS= read -r rb_path; do
-		[ -f "$rb_path" ] || continue
-		rb_size=$(stat -f %z "$rb_path" 2>/dev/null) || continue
-		[ "$rb_size" -gt 0 ] || continue
-		rb_bytes=$((rb_bytes + rb_size))
-		[ "$rb_bytes" -le "$VERIFY_MAX_BYTES" ] || break
-
-		# stderr is KEPT. It used to go to /dev/null, and on 2026-10-05 two
-		# files failed to restore two nights running with nothing in the log
-		# to say why — the check could only report that it failed.
-		#
-		# --exclude-xattr '*': this check compares CONTENT, and putting xattrs
-		# back is a separate step that can fail on its own. Once stderr was
-		# kept it said exactly that, on 2026-10-09: restic wrote the file, then
-		# macOS refused com.apple.system.Security (the ACL) on the temp copy
-		# with "operation not permitted", restic exited 1, and the content
-		# was never compared. Three nights of "READ-BACK FAILED" on a good
-		# repository.
-		if ! "$RESTIC" restore "$rb_new" --target "$rb_tmp" \
-			--include "$rb_path" --exclude-xattr '*' \
-			>/dev/null 2>"$rb_tmp/.err"; then
-			log "  read-back: FAILED to restore $rb_path"
-			grep -v '^[[:space:]]*$' "$rb_tmp/.err" | tail -5 |
-				while IFS= read -r rb_line; do log "      restic: $rb_line"; done
-			rb_fail=1
-			RB_UNRESTORED=$((RB_UNRESTORED + 1))
+	fc_thawing=0
+	fc_moved=0
+	fc_err=0
+	while IFS="$(printf '\t')" read -r fc_kind fc_key; do
+		if [ "$fc_kind" = content ]; then
+			if [ "$DRY_RUN" = 1 ]; then
+				fc_say "[dry-run] $fc_key: content, would copy to $STORAGE_CLASS"
+				continue
+			fi
+			if "$AWS_CLI" s3api copy-object --bucket "$BUCKET" --key "$fc_key" \
+				--copy-source "$BUCKET/$fc_key" --storage-class "$STORAGE_CLASS" \
+				--metadata-directive COPY >/dev/null 2>"$FC_TMP/err"; then
+				fc_moved=$((fc_moved + 1))
+			else
+				fc_say "$fc_key: copy to $STORAGE_CLASS FAILED — $(tail -1 "$FC_TMP/err")"
+				fc_err=$((fc_err + 1))
+			fi
 			continue
 		fi
-		rb_src=$(shasum -a 256 "$rb_path" 2>/dev/null | awk '{print $1}')
-		rb_got=$(shasum -a 256 "$rb_tmp$rb_path" 2>/dev/null | awk '{print $1}')
-		if [ -n "$rb_src" ] && [ "$rb_src" = "$rb_got" ]; then
-			log "  read-back: OK $rb_path"
-		else
-			log "  read-back: MISMATCH $rb_path (src=$rb_src got=${rb_got:-none})"
-			rb_fail=1
-			RB_MISMATCHED=$((RB_MISMATCHED + 1))
-		fi
 
-		rb_done=$((rb_done + 1))
-		[ "$rb_done" -lt "$VERIFY_FILES" ] || break
-	done <"$rb_tmp/.cands"
+		# A cold tree pack. Where is its thaw?
+		#   None                            not asked for yet
+		#   ongoing-request="true"          asked for, not ready
+		#   ongoing-request="false", ...    readable now, until expiry-date
+		fc_restore=$("$AWS_CLI" s3api head-object --bucket "$BUCKET" --key "$fc_key" \
+			--query Restore --output text 2>"$FC_TMP/err") || {
+			fc_say "$fc_key: head-object FAILED — $(tail -1 "$FC_TMP/err")"
+			fc_err=$((fc_err + 1))
+			continue
+		}
+		case "$fc_restore" in
+		*'ongoing-request="false"'*)
+			if [ "$DRY_RUN" = 1 ]; then
+				fc_say "[dry-run] $fc_key: tree, thawed, would copy to STANDARD"
+				continue
+			fi
+			if "$AWS_CLI" s3api copy-object --bucket "$BUCKET" --key "$fc_key" \
+				--copy-source "$BUCKET/$fc_key" --storage-class STANDARD \
+				--metadata-directive COPY >/dev/null 2>"$FC_TMP/err"; then
+				fc_say "$fc_key: tree, back in STANDARD"
+				fc_moved=$((fc_moved + 1))
+			else
+				fc_say "$fc_key: copy to STANDARD FAILED — $(tail -1 "$FC_TMP/err")"
+				fc_err=$((fc_err + 1))
+			fi
+			;;
+		*'ongoing-request="true"'*)
+			fc_say "$fc_key: tree, still thawing"
+			fc_thawing=$((fc_thawing + 1))
+			;;
+		*)
+			if [ "$DRY_RUN" = 1 ]; then
+				fc_say "[dry-run] $fc_key: tree, cold, would request a thaw"
+				continue
+			fi
+			# Standard tier, not Bulk: tree packs are few and small, so the
+			# price difference is cents and the wait is 12 h instead of 48.
+			# Days=7 so a thaw that finishes on a Friday survives the weekend.
+			if "$AWS_CLI" s3api restore-object --bucket "$BUCKET" --key "$fc_key" \
+				--restore-request 'Days=7,GlacierJobParameters={Tier=Standard}' \
+				>/dev/null 2>"$FC_TMP/err"; then
+				fc_say "$fc_key: tree, thaw requested"
+				fc_thawing=$((fc_thawing + 1))
+			else
+				fc_say "$fc_key: thaw request FAILED — $(tail -1 "$FC_TMP/err")"
+				fc_err=$((fc_err + 1))
+			fi
+			;;
+		esac
+	done <"$FC_TMP/plan"
 
-	log "  read-back: checked $rb_done file(s)"
-	rm -rf "$rb_tmp"
-	return $rb_fail
-}
+	[ "$DRY_RUN" = 1 ] && exit 0
+	fc_say "moved $fc_moved pack(s); $fc_thawing tree pack(s) thawing; $fc_err error(s)"
+	[ "$fc_err" = 0 ] || exit 2
+	if [ "$fc_thawing" -gt 0 ]; then
+		fc_say "Run this again in ~12 hours to move the thawed tree packs back to STANDARD."
+		exit 3
+	fi
+	fc_say "Every pack is in its class."
+	exit 0
+fi
+
+# ------------------------------------------------------------------- backup
 
 RAN=
 FAILED=
@@ -705,9 +790,6 @@ while read -r TPATH INTERVAL_DAYS; do
 	DSET=${TPATH%%/*}
 	# Slashes cannot go in a filename, so media/concerts becomes media_concerts.
 	STATE=$STATE_DIR/$(printf '%s' "$TPATH" | tr / _).last
-	# Present while the newest snapshot failed its read-back. See the
-	# "nothing changed" branch for why that has to outlive the run.
-	UNVERIFIED=$STATE_DIR/$(printf '%s' "$TPATH" | tr / _).unverified
 	INTERVAL=$((INTERVAL_DAYS * 86400))
 	# Half a run-period of slack, so a fire landing seconds early does not skip
 	# a whole interval. Half a day cannot let a target fire twice in one run.
@@ -769,6 +851,7 @@ while read -r TPATH INTERVAL_DAYS; do
 	set -- \
 		--tag "$TPATH" --tag offsite \
 		--pack-size "$PACK_SIZE" \
+		-o s3.storage-class="$STORAGE_CLASS" \
 		--exclude .DS_Store \
 		--exclude .Spotlight-V100 \
 		--exclude .fseventsd \
@@ -869,43 +952,12 @@ two runs from writing at once."
 	NEW=$(printf '%s\n' "$OUT" | awk '/snapshot [0-9a-f]+ saved/ { print $2; exit }')
 	if [ -z "$NEW" ]; then
 		log "  $TPATH: nothing changed — no snapshot recorded"
-		# An unchanged run proves nothing about the last snapshot, so it must
-		# not stand in for a passed read-back. On 2026-10-07 it did: media/zo
-		# had failed two nights running, the third found nothing new, wrote
-		# state, and the target went quiet for 30 days unverified. By then its
-		# packs are in Deep Archive and the free check cannot reach them, so
-		# this does not retry it. It stays failed until a person clears it.
-		if [ -f "$UNVERIFIED" ]; then
-			log "  $TPATH: STILL UNVERIFIED — snapshot $(awk '{print $2; exit}' "$UNVERIFIED") failed its read-back and nothing has changed since. After the full restore test, clear it with: sudo rm $UNVERIFIED"
-			FAILED="$FAILED $TPATH"
-			continue
-		fi
 		echo "$(now) $PARENT" >"$STATE"
 		RAN="$RAN $TPATH"
 		continue
 	fi
 
 	log "  $TPATH: snapshot $NEW saved"
-	if read_back_check "$TPATH" "$PARENT" "$NEW"; then
-		log "  $TPATH: read-back check passed"
-		rm -f "$UNVERIFIED"
-	else
-		echo "$(now) $NEW" >"$UNVERIFIED"
-		if [ "$RB_MISMATCHED" -gt 0 ]; then
-			alert "$TPATH: READ-BACK MISMATCH on snapshot $NEW." \
-				"The upload reported success but a file restored from it does not
-match the source. Treat the repository as suspect and run the full restore
-test before relying on it. Details in $LOG."
-		else
-			alert "$TPATH: READ-BACK could not RESTORE from snapshot $NEW." \
-				"restic could not restore $RB_UNRESTORED file(s) from it, so nothing
-was compared. restic's own error is in $LOG under this run. Until it
-is explained, run the full restore test before relying on this target."
-		fi
-		FAILED="$FAILED $TPATH"
-		continue
-	fi
-
 	echo "$(now) $NEW" >"$STATE"
 	RAN="$RAN $TPATH"
 
@@ -914,14 +966,17 @@ rm -f "$TABLE"
 
 # --------------------------------------------- storage-class invariant
 
-# restic must read config, keys/, index/, snapshots/ and locks/ on EVERY run.
-# The lifecycle rule is scoped to data/ exactly so they stay in Standard.
+# restic must read config, keys/, index/, snapshots/ and locks/ on EVERY run,
+# and the tree packs in data/ on nearly every command. All of them must be in
+# Standard. See DESIGN 5 for how they get there.
 #
-# But a lifecycle rule is a thing a person can edit, and the failure a wrong
-# one produces is the worst shape available: the repository simply stops
-# opening, WEEKS after the change, with nothing in between to connect cause to
-# effect. You would be debugging restic while the actual mistake was a console
-# click from the previous month.
+# The failure a wrong class produces is the worst shape available: it arrives
+# WEEKS after the cause, with nothing in between to connect the two. A
+# lifecycle rule someone adds, a console click, a restic upgrade that changes
+# what the storage-class option touches. On 2026-10-10 it was this script's own
+# lifecycle rule, and this check did not catch it because it looked only at
+# the prefixes outside data/ — the trees were assumed safe because nothing said
+# otherwise. Now it looks at them by id.
 #
 # This began as a diary entry — "~8 October: confirm data/ actually moved" —
 # which answers the question once, on one day, if someone remembers. As an
@@ -936,6 +991,10 @@ check_storage_classes() {
 	}
 	[ -x "$AWS_CLI" ] || {
 		log "  storage-class check: $AWS_CLI not found — SKIPPED"
+		return 2
+	}
+	[ -x "$JQ" ] || {
+		log "  storage-class check: $JQ not found — SKIPPED"
 		return 2
 	}
 
@@ -963,27 +1022,61 @@ check_storage_classes() {
 
 	if [ -n "$csc_bad" ]; then
 		alert "restic METADATA has left Standard storage — the repository will stop opening." \
-			"The lifecycle rule must transition data/ ONLY. Something now matches
-more than that, and restic cannot read an archived object at all.
+			"No lifecycle rule may transition anything in this bucket — restic
+picks the storage class itself (DESIGN 5). Something has moved these, and
+restic cannot read an archived object at all.
 
 $(printf '%s' "$csc_bad" | head -10)
 
-Fix the rule, then restore these objects to Standard. Until both are done
+Remove the rule, then restore these objects to Standard. Until both are done
 no backup can run and no restore can start.
 
   aws s3api get-bucket-lifecycle-configuration --bucket $BUCKET"
 		return 1
 	fi
 
-	# Not an assertion — data/ is SUPPOSED to go cold, and anything under 7
-	# days old legitimately has not yet, so there is no threshold worth
-	# alerting on. Logged so the transition is visible without anyone being
-	# asked to go and look.
-	csc_dist=$("$AWS_CLI" s3api list-objects-v2 --bucket "$BUCKET" --prefix data/ \
-		--query 'Contents[].StorageClass' --output text 2>/dev/null |
-		tr '\t' '\n' | grep -v '^None$' | sed '/^[[:space:]]*$/d' |
-		sort | uniq -c | tr -s ' ' | tr '\n' ' ')
-	log "  storage classes OK: metadata all STANDARD; data/ —${csc_dist:- empty}"
+	# Tree packs, by id. Which packs are trees is only in restic's index, so
+	# this reads it. An index that cannot be read means this cannot answer,
+	# which is "skipped", not "ok".
+	csc_trees=$(mktemp /tmp/tank-offsite-trees.XXXXXX) || return 2
+	if ! tree_packs >"$csc_trees" || [ ! -s "$csc_trees" ]; then
+		rm -f "$csc_trees"
+		log "  storage-class check: could not read restic's index to find tree packs — SKIPPED"
+		return 2
+	fi
+	csc_ntrees=$(wc -l <"$csc_trees" | tr -d ' ')
+	if ! csc_objs=$(list_data_classes 2>/dev/null); then
+		rm -f "$csc_trees"
+		log "  storage-class check: listing data/ failed — SKIPPED"
+		return 2
+	fi
+	csc_plan=$(printf '%s\n' "$csc_objs" | misfiled_packs "$csc_trees")
+	rm -f "$csc_trees"
+	csc_cold=$(printf '%s\n' "$csc_plan" | grep -c '^tree')
+	csc_warm=$(printf '%s\n' "$csc_plan" | grep -c '^content')
+
+	if [ "$csc_cold" -gt 0 ]; then
+		alert "$csc_cold restic TREE pack(s) are out of Standard storage — check, prune and restore will fail." \
+			"Tree packs hold every snapshot's directory structure and restic reads
+them on nearly every command. They live in data/ next to the content packs,
+so a lifecycle rule on data/ catches them too.
+
+$(printf '%s\n' "$csc_plan" | grep '^tree' | cut -f2 | head -10)
+
+Make sure no lifecycle rule transitions data/, then thaw them and move them
+back (re-run after ~12 h until it says done):
+  pass show nas/offsite-prune-aws | sudo $0 --fix-classes"
+		return 1
+	fi
+
+	# Content left in Standard is money, not breakage, so it is logged rather
+	# than alerted. Expected to be 0: restic uploads content straight to
+	# $STORAGE_CLASS. A number that grows night after night means the option
+	# is not reaching restic.
+	csc_note=
+	[ "$csc_warm" -gt 0 ] &&
+		csc_note="; $csc_warm content pack(s) still in STANDARD — --fix-classes moves them"
+	log "  storage classes OK: metadata and $csc_ntrees tree pack(s) STANDARD$csc_note"
 	return 0
 }
 
@@ -996,10 +1089,11 @@ esac
 
 # --------------------------------------------------------------------- check
 
-# Metadata-only. This validates that the bookkeeping is self-consistent and
-# reads nothing out of data/, so it costs nothing and works fine against Deep
-# Archive. `check --read-data`, which re-verifies every chunk, would need the
-# whole archive pulled out of Glacier and is not available to us at all.
+# Metadata-only: index, snapshots, and every tree pack — which is why the tree
+# packs must stay in Standard (DESIGN 5). It never reads content, so Deep
+# Archive does not bother it. `check --read-data`, which re-verifies every
+# chunk, would need the whole archive pulled out of Glacier and is not
+# available to us at all.
 if [ -n "$RAN" ] && [ "$DRY_RUN" = 0 ]; then
 	# NOT `restic check | sed`: a pipeline's status is the LAST command's, and
 	# sed always succeeds, so a failing check would be logged as clean. Same
@@ -1030,6 +1124,16 @@ If no restic process is alive, clear the stale lock by hand:
   sudo $RESTIC unlock
 Then re-run. Deliberately not scripted — an automatic unlock would defeat
 the thing that stops two runs writing at once."
+			;;
+		*"not valid for the object's storage class"*)
+			# 2026-10-10: tree packs had gone to Deep Archive. The generic
+			# wording below says "bookkeeping does not agree", which reads as
+			# corruption. Nothing is corrupt; restic is locked out of it.
+			alert "restic check could not read tree packs: they are in Deep Archive." \
+				"This is NOT corruption. The backup succeeded; check needs the
+snapshots' directory structure and S3 will not serve it from Glacier. The
+storage-class check in this run names the packs and the fix:
+  pass show nas/offsite-prune-aws | sudo $0 --fix-classes"
 			;;
 		*)
 			alert "restic check reported problems after a successful backup." \

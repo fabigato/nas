@@ -39,19 +39,19 @@
 # read the archive. It cannot remove it. Reclaiming space is the job of the
 # lifecycle rule, which no credential here can edit.
 #
-# 3. THE LIFECYCLE RULE IS SCOPED TO data/ AND THAT IS LOAD-BEARING.
+# 3. THE LIFECYCLE RULE TRANSITIONS NOTHING, AND THAT IS LOAD-BEARING.
 #
 # restic must read its own bookkeeping — config, keys/, index/, snapshots/,
-# locks/ — on EVERY run. Those are a few hundred KB. If a blanket rule pushed
-# them into Deep Archive, restic could not start at all, and the failure would
-# arrive weeks later when the transition finally fired, not today when it would
-# be obvious. So only data/ transitions. Everything else stays in Standard,
-# costs cents a year, and keeps the repository openable.
+# locks/ — on EVERY run, and the tree packs under data/ on nearly every command.
+# A rule that pushes any of them into Deep Archive breaks the repository WEEKS
+# after the change, when the transition finally fires.
 #
-# The 7-day delay before transition is deliberate: for a week after each run the
-# newly written packs are still readable at Standard rates, which is what makes
-# the monthly read-back check free and instant instead of a 12-hour Glacier
-# round trip.
+# The first version scoped a 7-day transition to data/, on the belief that
+# nothing under data/ was read routinely. restic's tree packs live there too,
+# and on 2026-10-10 — the first night the seed's trees had gone cold —
+# `restic check` failed on every snapshot. A prefix cannot tell a tree pack from
+# a content pack. restic can, so tank-offsite.sh uploads with
+# -o s3.storage-class=DEEP_ARCHIVE and restic sends only content cold.
 #
 # 4. THE ABORT-INCOMPLETE-UPLOADS RULE IS NOT BOILERPLATE.
 #
