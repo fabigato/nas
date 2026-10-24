@@ -83,6 +83,20 @@
 # that is still blank and has never been copied is skipped quietly — there is
 # nothing to protect yet. A deleted profile's last copy is left where it is.
 #
+# 8. CONTAINER AGENTS GO THROUGH THE SAME PIPELINE, VIA AN EXPORT.
+#
+# Some agents run in Docker and keep their home in a named volume (the friend's
+# Hermes in ~/repos/local_llm/agents/hermes). A volume lives inside Docker
+# Desktop's VM, so the host can't read it in place. Each night a throwaway
+# container from the agent's own image mounts the volume, takes the same
+# allow-list (databases through SQLite's backup API, as in design 2) and hands
+# it over as a tar stream. It runs as uid 10000 (the image's `hermes` user), for
+# the reason in design 1, and with no network. The unpacked export then goes
+# through backup_agent like any other agent, so the blank/shrink guards, the
+# unchanged-night skip, the swap and the alerts all apply. The copy lands in
+# hermes/containers/<name>/current. If Docker isn't running, the run fails and
+# alerts. If the volume is gone, the last copy stays, like a deleted profile.
+#
 # Exit codes:  0 ok · 1 refused (tank/documents not mounted, an agent looks blank
 #              or shrunk) · 2 an operation failed
 
@@ -98,6 +112,7 @@ LAST=${HERMES_BACKUP_LAST:-/var/log/hermes-backup.last}
 ZEDRC=${HERMES_BACKUP_ZEDRC:-/etc/zfs/zed.d/zed.rc}
 ZFS=/usr/local/zfs/bin/zfs
 SQLITE=/usr/bin/sqlite3
+DOCKER=/usr/local/bin/docker
 SHRINK_LIMIT_PCT=50
 NOTIFY_MAX_CHARS=1500
 
@@ -106,6 +121,34 @@ NOTIFY_MAX_CHARS=1500
 FILES="SOUL.md config.yaml .env channel_directory.json .hermes_history profile.yaml"
 DIRS="memories skills sessions cron platforms pairing hooks plans"
 DBS="state.db kanban.db projects.db cron/executions.db"
+
+# Agents whose home is a Docker volume, as "<name>:<volume>:<container>"
+# separated by spaces. The container supplies the image used to read the
+# volume. See design 8.
+CONTAINER_AGENTS=${HERMES_BACKUP_CONTAINER_AGENTS:-hermes-friend:hermes-friend_hermes-data:hermes-friend}
+
+# Runs inside the throwaway container (design 8) with the volume at /opt/data
+# and FILES/DIRS/DBS in its environment. Writes a tar of ENTRIES (the volume's
+# top-level listing, for MANIFEST) and data/ (the allow-list) to stdout.
+# Sockets and locks are skipped. Databases are re-taken with the backup API.
+EXPORT_SH='set -eu
+S=$(mktemp -d)
+mkdir "$S/data"
+cd /opt/data
+ls -A >"$S/ENTRIES"
+keep=""
+for e in $FILES $DIRS; do [ -e "$e" ] && keep="$keep $e"; done
+[ -n "$keep" ] && tar -cf - --exclude="*.lock" --exclude=".hub" --exclude="ticker_*" $keep 2>/dev/null |
+	tar -xf - -C "$S/data"
+for db in $DBS; do
+	[ -f "$db" ] || continue
+	mkdir -p "$S/data/$(dirname "$db")"
+	rm -f "$S/data/$db"
+	python3 -c "import sqlite3, sys
+s = sqlite3.connect(sys.argv[1], timeout=30); d = sqlite3.connect(sys.argv[2])
+s.backup(d); d.close(); s.close()" "$db" "$S/data/$db"
+done
+tar -C "$S" -cf - ENTRIES data'
 
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
@@ -276,21 +319,24 @@ backup_agent() {
 
 	copied=$(cd "$INCOMING" && ls -A | tr '\n' ' ')
 	# The default agent's profiles/ is not skipped: each profile has its own copy.
-	skipped=$(cd "$AGENT" && for e in $(ls -A); do
+	# A container agent's export holds only the allow-list; ENTRIES is the
+	# volume's own listing (design 8).
+	skipped=$(cd "$AGENT" && for e in ${ENTRIES:-$(ls -A)}; do
 		[ "$NAME" = default ] && [ "$e" = profiles ] && continue
 		[ -e "$INCOMING/$e" ] || printf '%s ' "$e"
 	done)
+	restore=${RESTORE:-"Restore: reinstall Hermes, check out the commit above in $SRC/hermes-agent
+(so state.db's schema matches), stop Hermes, copy everything here into
+$AGENT, start Hermes."}
 	as_user sh -c "cat >'$INCOMING/MANIFEST'" <<EOF
 taken:          $(date '+%Y-%m-%d %H:%M:%S %z')
 host:           $(hostname -s)
 agent:          $NAME
-source:         $AGENT
+source:         ${SOURCE:-$AGENT}
 hermes:         ${version:-unknown}
 hermes-agent:   ${commit:-unknown}
 
-Restore: reinstall Hermes, check out the commit above in $SRC/hermes-agent
-(so state.db's schema matches), stop Hermes, copy everything here into
-$AGENT, start Hermes.
+$restore
 
 copied:  $copied
 not copied (reinstallable, caches, or new — check this list after upgrades):
@@ -314,6 +360,59 @@ EOF
 	exit 0
 }
 
+# Docker as the owner: Docker Desktop's socket and CLI config live in their home.
+dk() {
+	as_user env DOCKER_HOST="unix:///Users/$OWNER/.docker/run/docker.sock" \
+		DOCKER_CONFIG="/Users/$OWNER/.docker" "$DOCKER" "$@"
+}
+
+# $1 = name, $2 = its Docker volume, $3 = its container. Exports the volume
+# into a temp dir, then hands that to backup_agent. Run in a subshell, like
+# backup_agent. See design 8.
+backup_container_agent() {
+	NAME=$1
+	VOLUME=$2
+	CONTAINER=$3
+	OUT=$DEST/containers/$NAME
+
+	dk info >/dev/null 2>&1 ||
+		fail 2 "Docker is not running, so the $VOLUME volume can't be read. Start Docker Desktop; tomorrow's run catches up."
+	if ! dk volume inspect "$VOLUME" >/dev/null 2>&1; then
+		if [ -d "$OUT/current" ]; then
+			log "  [$NAME] volume $VOLUME no longer exists; its last copy stays in $OUT/current"
+		else
+			log "  [$NAME] volume $VOLUME doesn't exist yet and was never copied; skipped"
+		fi
+		exit 0
+	fi
+	# The export needs only sh, tar and python3. After `docker compose down` the
+	# container is gone but the volume isn't, so any local Hermes image will do.
+	image=$(dk inspect -f '{{.Config.Image}}' "$CONTAINER" 2>/dev/null) ||
+		image=$(dk images --format '{{.Repository}}:{{.Tag}}' nousresearch/hermes-agent 2>/dev/null | grep -v '<none>' | head -1)
+	[ -n "$image" ] ||
+		fail 2 "no container $CONTAINER and no local nousresearch/hermes-agent image to read the $VOLUME volume with"
+
+	STAGE=$(as_user mktemp -d /tmp/hermes-backup.XXXXXX) || fail 2 "mktemp failed"
+	trap 'as_user rm -rf "$STAGE"' EXIT
+	# Created by the owner so root's redirect below keeps it readable to them.
+	as_user touch "$STAGE/export.tar"
+	dk run --rm --pull never --network none --user 10000:10000 \
+		-e FILES="$FILES" -e DIRS="$DIRS" -e DBS="$DBS" \
+		-v "$VOLUME:/opt/data" --entrypoint sh "$image" -c "$EXPORT_SH" \
+		>"$STAGE/export.tar" 2>>"$LOG" || fail 2 "exporting the $VOLUME volume failed; see $LOG"
+	as_user mkdir "$STAGE/x" && as_user tar -xf "$STAGE/export.tar" -C "$STAGE/x" ||
+		fail 2 "unpacking the export of $VOLUME failed"
+
+	ENTRIES=$(cat "$STAGE/x/ENTRIES")
+	SOURCE="docker volume $VOLUME (container $CONTAINER)"
+	version="image $image"
+	commit="$(dk inspect -f '{{.Image}}' "$CONTAINER" 2>/dev/null) (image ID; the code is in the image)"
+	RESTORE="Restore: see ~/repos/local_llm/agents/hermes/README.md. In short: stop
+the stack, copy everything here except MANIFEST into the $VOLUME volume
+owned by uid 10000, start the stack with the image above."
+	backup_agent "$STAGE/x/data" "$OUT" "$NAME"
+}
+
 # --- run -------------------------------------------------------------------
 
 worst=0
@@ -334,6 +433,14 @@ for c in "$DEST"/profiles/*/; do
 	[ -d "$c" ] || continue
 	name=$(basename "$c")
 	[ -d "$SRC/profiles/$name" ] || log "  [$name] no longer in $SRC/profiles; its last copy stays in ${c%/}"
+done
+
+for spec in $CONTAINER_AGENTS; do
+	IFS=: read -r name volume container <<EOF
+$spec
+EOF
+	(backup_container_agent "$name" "$volume" "$container")
+	note $?
 done
 
 [ "$worst" -eq 0 ] && finish 0

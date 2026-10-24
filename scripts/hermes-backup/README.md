@@ -13,9 +13,17 @@ Every profile is its own agent, and the copies mirror `~/.hermes`:
 |---|---|---|
 | default (Xochiquetzal) | `~/.hermes` | `/Volumes/tank/documents/hermes/current/` |
 | any profile, e.g. `tezcatlipoca` | `~/.hermes/profiles/<name>` | `/Volumes/tank/documents/hermes/profiles/<name>/current/` |
+| container agent `hermes-friend` | Docker volume `hermes-friend_hermes-data` ([local_llm/agents/hermes](../../../local_llm/agents/hermes/README.md)) | `/Volumes/tank/documents/hermes/containers/hermes-friend/current/` |
 
 Profiles are found automatically, so a new one is backed up from its first
-night. Each agent is backed up on its own: one that refuses or fails doesn't
+night. Container agents are listed in `CONTAINER_AGENTS` at the top of the
+script, as `name:volume:container`. The host can't read a Docker volume in
+place, so each night a throwaway container (the agent's own image, no network,
+uid 10000) exports the same allow-list as a tar. That export then goes through
+the same steps as every other agent (design 8 in the script). Docker Desktop
+must be running at 01:00; if it isn't, the run alerts and tomorrow's catches up.
+The Hermes stack itself may be down: the export reads the volume, not the
+running container. Each agent is backed up on its own: one that refuses or fails doesn't
 stop the others, and the alert lists every agent with a problem. A profile's
 `workspace/` (files the agent made) and `auth.json` (its provider login, which
 rotates) are not copied.
@@ -46,6 +54,7 @@ cat /var/log/hermes-backup.last
 tail -20 /var/log/hermes-backup.log
 cat /Volumes/tank/documents/hermes/current/MANIFEST
 cat /Volumes/tank/documents/hermes/profiles/*/current/MANIFEST
+cat /Volumes/tank/documents/hermes/containers/*/current/MANIFEST
 ```
 
 Failures and refusals go to the zed Discord channel, like the other daemons.
@@ -75,6 +84,11 @@ every night. Delete that folder by hand once you're sure.
      `cp -Rp /Volumes/tank/documents/hermes/profiles/<name>/current/. ~/.hermes/profiles/<name>/`
 4. Start Hermes. Log a profile back in to its provider if it used one
    (`<name> auth add ...`).
+
+A container agent is restored into its volume instead, with the stack stopped.
+Delete the old `*.db-wal`/`*.db-shm` first, because a stale WAL would be
+replayed into the restored database. The exact, tested command is in
+`~/repos/local_llm/agents/hermes/README.md`, under "Persistence and backups".
 
 Older versions: `/Volumes/tank/documents/.zfs/snapshot/*/hermes/current` (7
 daily, 4 weekly, 6 monthly), or `restic restore latest --tag documents --include
