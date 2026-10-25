@@ -24,9 +24,11 @@ the same steps as every other agent (design 8 in the script). Docker Desktop
 must be running at 01:00; if it isn't, the run alerts and tomorrow's catches up.
 The Hermes stack itself may be down: the export reads the volume, not the
 running container. Each agent is backed up on its own: one that refuses or fails doesn't
-stop the others, and the alert lists every agent with a problem. A profile's
-`workspace/` (files the agent made) and `auth.json` (its provider login, which
-rotates) are not copied.
+stop the others, and the alert lists every agent with a problem. An agent's
+`workspace/` (files the agent made for its user) and `auth.json` (its provider
+login, which rotates) are not copied. That applies to profiles and container
+agents alike: chats, memory, skills and config are backed up, files the agent
+created are not.
 
 A night with no changes writes nothing. Unchanged files are hard-linked to the
 previous copy, so the daily `documents` snapshots only pay for what changed.
@@ -46,6 +48,23 @@ sudo launchctl bootstrap system /Library/LaunchDaemons/local.hermes-backup.plist
 sudo launchctl kickstart -k system/local.hermes-backup     # first run, now
 cat /var/log/hermes-backup.last                            # expect: exit 0 ok
 ```
+
+### Updating the script
+
+The installed copy doesn't follow the repo by itself. After a change to
+`hermes-backup.sh` (for example, the container-agent support added on
+2026-10-25), diff it and reinstall only the script. The plist is unchanged, so
+launchd needs nothing:
+
+```sh
+cd ~/repos/nas/scripts
+diff -u /usr/local/sbin/hermes-backup.sh hermes-backup/hermes-backup.sh
+sudo install -m 755 -o root -g wheel hermes-backup/hermes-backup.sh /usr/local/sbin/
+sudo launchctl kickstart -k system/local.hermes-backup && sleep 15 && tail -5 /var/log/hermes-backup.log
+```
+
+A container agent shows up in the log as `[hermes-friend] copied to
+…/containers/hermes-friend/current`.
 
 ## Check on it
 

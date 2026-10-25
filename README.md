@@ -22,6 +22,7 @@ Everything here assumes the OpenZFS-on-macOS fork with binaries in
 | `scripts/nas-backup/` | Creating the offline backup pool, and replicating to it |
 | `scripts/nas-offsite/` | The third copy — encrypted into S3 Glacier Deep Archive. Has its own [README](scripts/nas-offsite/README.md) for bootstrap and day-to-day use |
 | `scripts/nas-jellyfin/` | The media server the pool exists to serve |
+| `scripts/hermes-backup/` | Nightly copy of every Hermes agent onto `tank/documents`: the `~/.hermes` agents and profiles, plus container agents such as the friend's Hermes in Docker. Has its own [README](scripts/hermes-backup/README.md) |
 | `tests/` | Test harnesses — see [Tests](#tests) |
 
 Each script carries a long header comment explaining its own design decisions.
@@ -65,7 +66,8 @@ stand.
 Two more daemons exist and are documented in their own sections because they are
 not about keeping the pool healthy: [`local.tank-offsite`](#the-offsite-copy--bootstrap-offsitesh-then-tank-offsitesh)
 and [`local.jellyfin`](#jellyfin--localjellyfin). They follow the same
-conventions. `tank-backup.sh` is the odd one out — deliberately **not** a daemon,
+conventions. So does `local.hermes-backup` (01:00 nightly, ahead of the
+off-site run), documented in [its own README](scripts/hermes-backup/README.md). `tank-backup.sh` is the odd one out — deliberately **not** a daemon,
 because the drive it writes to is meant to be unplugged.
 
 ### Boot unlock — `local.tank-boot-unlock`
