@@ -22,6 +22,7 @@ Everything here assumes the OpenZFS-on-macOS fork with binaries in
 | `scripts/nas-backup/` | Creating the offline backup pool, and replicating to it |
 | `scripts/nas-offsite/` | The third copy — encrypted into S3 Glacier Deep Archive. Has its own [README](scripts/nas-offsite/README.md) for bootstrap and day-to-day use |
 | `scripts/nas-jellyfin/` | The media server the pool exists to serve |
+| `scripts/nas-copyparty/` | The Dropbox replacement: `tank/documents` over the tailnet, phone uploads through Party UP! |
 | `scripts/hermes-backup/` | Nightly copy of every Hermes agent onto `tank/documents`: the `~/.hermes` agents and profiles, plus container agents such as the friend's Hermes in Docker. Has its own [README](scripts/hermes-backup/README.md) |
 | `tests/` | Test harnesses — see [Tests](#tests) |
 
@@ -533,6 +534,35 @@ announce themselves:
 
 Exposure is `tailscale serve`, never `tailscale funnel`, on its own port —
 `:8443` already belongs to ComfyUI.
+
+## Copyparty — `local.copyparty`
+
+The Dropbox replacement. Serves all of `tank/documents` read-write over
+Tailscale only (`https://<mac>.<tailnet>.ts.net:8445`), with one
+password-protected account. Phones upload from the share menu with the Party UP!
+Android app (F-Droid); everything else uses the web UI.
+
+**Why not Seafile.** Its server is Docker-only since 13.0, and Docker Desktop
+here only starts after a login, so it would not come back unattended. It also
+stores libraries as blocks, which every protection layer here would back up as
+opaque chunks. copyparty is one Homebrew Python program writing plain files.
+
+**Loopback bind plus Serve**, as for Jellyfin. The password is on top of that
+because the Pi is on the tailnet with SSH open to the internet: tailnet access
+alone should not be enough. copyparty trusts `X-Forwarded-For` from 127.0.0.1 only,
+so the wrong-password ban hits the guessing device, not every device at once.
+
+**The wrapper refuses to start without `tank/documents` mounted.** Otherwise an
+upload would land on the boot SSD, outside snapshots and backups, and the
+leftover files would then block the real dataset from mounting.
+
+**Nothing but uploads goes to `tank`.** The upload database and thumbnails are
+under `/usr/local/var/copyparty/hist`; request logs are monthly files in
+`/var/log/copyparty/`.
+
+**Secrets.** `copyparty.conf` has none and is installed as-is. The password is
+`pass` entry `copyparty/fabian`; `make-accounts.sh` writes only its argon2 hash
+into `/usr/local/var/copyparty/accounts.conf` (mode 600).
 
 ## Install
 

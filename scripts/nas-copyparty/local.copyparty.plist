@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.copyparty</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/copyparty-server.sh</string>
+	</array>
+
+	<!-- A LaunchDaemon so it is back before anyone logs in; this machine has
+	     no auto-login. Runs as fabigato, who owns tank/documents. -->
+	<key>UserName</key>
+	<string>fabigato</string>
+	<key>GroupName</key>
+	<string>staff</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Unconditional, as for Jellyfin: a nonzero exit means "the pool was not
+	     there", which fixes itself when the enclosure comes back. -->
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+
+	<!-- launchd's PATH lacks /opt/homebrew/bin; copyparty finds ffmpeg (video
+	     thumbnails) through PATH. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+
+	<key>SoftResourceLimits</key>
+	<dict>
+		<key>NumberOfFiles</key>
+		<integer>4096</integer>
+	</dict>
+
+	<!-- Request logs go to /var/log/copyparty/ via `lo` in the config, and the
+	     config sets `q`, so this file only catches startup errors and crashes. -->
+	<key>StandardOutPath</key>
+	<string>/var/log/copyparty-server.launchd.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/copyparty-server.launchd.log</string>
+
+	<key>WorkingDirectory</key>
+	<string>/usr/local/var/copyparty</string>
+</dict>
+</plist>
