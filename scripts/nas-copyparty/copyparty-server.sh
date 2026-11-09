@@ -16,7 +16,9 @@
 #
 # ---------------------------------------------------------------------------
 # Why the guard matters here (different from Jellyfin's reason):
-# with the pool absent, /Volumes/tank/documents is either missing or an empty
+# tank/my_media is served too (read-only), so an unmounted one would show as
+# an empty folder rather than an error; it is waited for as well. For
+# documents the stakes are higher: with the pool absent, /Volumes/tank/documents is either missing or an empty
 # directory on the boot SSD. An upload in that state would land on the SSD,
 # outside snapshots and backups, and the leftover files would then make the
 # real dataset fail to mount over a non-empty directory. So: no healthy,
@@ -38,8 +40,8 @@ ZPOOL=/usr/local/zfs/bin/zpool
 ZFS=/usr/local/zfs/bin/zfs
 
 POOL=tank
-DATASET=tank/documents
-MOUNT=/Volumes/tank/documents
+# dataset:mountpoint pairs. Every one must be mounted where expected.
+DATASETS="tank/documents:/Volumes/tank/documents tank/my_media:/Volumes/tank/my_media"
 
 CPP_BIN=/opt/homebrew/bin/copyparty
 CPP_ROOT=/usr/local/var/copyparty
@@ -84,12 +86,17 @@ while : ; do
 	health=$("$ZPOOL" list -H -o health "$POOL" 2>/dev/null)
 
 	if [ "$health" = "ONLINE" ] || [ "$health" = "DEGRADED" ]; then
-		mounted=$("$ZFS" get -H -o value mounted "$DATASET" 2>/dev/null)
-		mp=$("$ZFS" get -H -o value mountpoint "$DATASET" 2>/dev/null)
-		if [ "$mounted" = "yes" ] && [ "$mp" = "$MOUNT" ]; then
-			break
-		fi
-		state="$DATASET not mounted at $MOUNT (mounted=$mounted, mountpoint=$mp)"
+		missing=
+		for pair in $DATASETS; do
+			ds=${pair%%:*}; want=${pair#*:}
+			mounted=$("$ZFS" get -H -o value mounted "$ds" 2>/dev/null)
+			mp=$("$ZFS" get -H -o value mountpoint "$ds" 2>/dev/null)
+			if [ "$mounted" != "yes" ] || [ "$mp" != "$want" ]; then
+				missing="$missing $ds(mounted=$mounted,mountpoint=$mp)"
+			fi
+		done
+		[ -z "$missing" ] && break
+		state="not mounted where expected:$missing"
 	elif [ -z "$health" ]; then
 		state="pool '$POOL' not imported"
 	else
@@ -107,7 +114,7 @@ would land on the boot SSD. launchd will retry."
 done
 
 [ "$waited" -gt 0 ] && log "pool ready after ${waited}s"
-log "pool $POOL is $health, $DATASET mounted at $MOUNT"
+log "pool $POOL is $health, mounted:$(printf ' %s' $DATASETS)"
 
 # --- become the server ----------------------------------------------------
 log "exec $CPP_BIN -c $CPP_CONF"

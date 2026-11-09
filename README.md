@@ -539,7 +539,8 @@ Exposure is `tailscale serve`, never `tailscale funnel`, on its own port —
 
 The Dropbox replacement. Serves all of `tank/documents` read-write over
 Tailscale only (`https://<mac>.<tailnet>.ts.net:8445`), with one
-password-protected account. Phones upload from the share menu with the Party UP!
+password-protected account. `tank/my_media` is also served, read-only, as
+`/my_media`; the wrapper waits for both datasets. Phones upload from the share menu with the Party UP!
 Android app (F-Droid); everything else uses the web UI.
 
 **Why not Seafile.** Its server is Docker-only since 13.0, and Docker Desktop
