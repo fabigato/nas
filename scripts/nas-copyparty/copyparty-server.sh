@@ -48,11 +48,17 @@ CPP_ROOT=/usr/local/var/copyparty
 CPP_CONF="$CPP_ROOT/copyparty.conf"
 CPP_ACCOUNTS="$CPP_ROOT/accounts.conf"
 CPP_HIST="$CPP_ROOT/hist"
-CPP_LOGDIR=/var/log/copyparty
+CPP_LOGDIR=/usr/local/var/log/copyparty
 
-# In a fabigato-owned directory, not directly in /var/log — see the note in
-# local.jellyfin.plist.
-LOG=/var/log/copyparty-server/wrapper.log
+# Logging is this script's job, not launchd's: the plist deliberately sets no
+# StandardOutPath, because launchd opening it as fabigato before exec is what
+# took this daemon down when /var/log was swept. See the note in
+# local.jellyfin.plist. /usr/local/var/log is owned fabigato:staff and
+# /usr/local is untouched by the macOS installer, so every directory below can
+# be recreated from here.
+CPP_LOGS=/usr/local/var/log/copyparty-server
+LOG="$CPP_LOGS/wrapper.log"      # this wrapper's own guard messages
+CONSOLE="$CPP_LOGS/console.log"  # copyparty's console: startup errors, crashes
 
 # Longer than the boot unlock's own 120 s poll, as in jellyfin-server.sh: both
 # start together at boot and the unlock has to finish first.
@@ -68,6 +74,20 @@ fail() {
 	exit "${2:-1}"
 }
 
+# --- our own logging ------------------------------------------------------
+# Before anything that logs. Both directories are ours to create: nothing else
+# does it now that the plist has no StandardOutPath, and a sweep of the log tree
+# must not be able to stop the server.
+mkdir -p "$CPP_LOGS" "$CPP_LOGDIR" 2>/dev/null
+
+# copyparty inherits our stdout/stderr, so this is what captures its console.
+# Guarded on purpose: if the redirect cannot be made the server still starts and
+# only the console capture is lost, rather than the shell dying on a failed
+# redirect and taking the service with it.
+if : >>"$CONSOLE" 2>/dev/null; then
+	exec >>"$CONSOLE" 2>&1
+fi
+
 log "--- starting (pid $$, uid $(id -u), user $(id -un)) ---"
 
 # --- install sanity -------------------------------------------------------
@@ -77,7 +97,12 @@ log "--- starting (pid $$, uid $(id -u), user $(id -un)) ---"
 [ -r "$CPP_CONF" ]     || fail "config missing: $CPP_CONF" 2
 [ -r "$CPP_ACCOUNTS" ] || fail "accounts missing: $CPP_ACCOUNTS (run make-accounts.sh)" 2
 
-for d in "$CPP_ROOT" "$CPP_HIST" "$CPP_LOGDIR"; do
+# CPP_LOGDIR is deliberately not in this loop. It is a log directory, created
+# above, and a missing or unwritable one must never be a reason to refuse to
+# serve files -- it is only warned about.
+[ -w "$CPP_LOGDIR" ] || log "WARNING: $CPP_LOGDIR not writable; request logging will fail"
+
+for d in "$CPP_ROOT" "$CPP_HIST"; do
 	[ -d "$d" ] || fail "state directory missing: $d (run the install steps)" 2
 	[ -w "$d" ] || fail "state directory not writable by $(id -un): $d" 2
 done

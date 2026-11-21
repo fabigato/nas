@@ -44,20 +44,28 @@
 		<integer>4096</integer>
 	</dict>
 
-	<!-- Request logs go to /var/log/copyparty/ via `lo` in the config, and the
-	     config sets `q`, so this file only catches startup errors and crashes.
+	<!-- NO StandardOutPath / StandardErrorPath, deliberately.
 
-	     In a fabigato-owned DIRECTORY, not directly in /var/log, for the reason
-	     spelled out at length in local.jellyfin.plist: launchd opens this path as
-	     the job's user before exec, /var/log is root:wheel 0755, and a missing file
-	     there is an unrecoverable EX_CONFIG (78) spawn failure with no log output
-	     to explain it. Both daemons went down that way on 2026-11-21. Not
-	     /var/log/copyparty/ either — copyparty names its own request logs by month
-	     in there and that directory is its property, not launchd's. -->
-	<key>StandardOutPath</key>
-	<string>/var/log/copyparty-server/launchd.log</string>
-	<key>StandardErrorPath</key>
-	<string>/var/log/copyparty-server/launchd.log</string>
+	     Request logs go to /usr/local/var/log/copyparty/ via `lo` in the config,
+	     and the config sets `q`, so copyparty's console only carries startup
+	     errors and crashes. The wrapper captures that into
+	     /usr/local/var/log/copyparty-server/console.log and writes its own guard
+	     messages to wrapper.log beside it.
+
+	     Why the wrapper and not launchd, at length in local.jellyfin.plist; the
+	     short version is that launchd opens StandardOutPath as the job's user
+	     before exec, so a missing file under a parent that user cannot write is an
+	     unrecoverable EX_CONFIG (78) spawn failure with nothing logged to explain
+	     it. Something swept /var/log around the macOS 27.2.1 update on 2026-11-20
+	     and that is exactly what happened to this daemon, to Jellyfin and to the
+	     LM Studio daemon. /var/log is root:wheel 0755, so moving the files into a
+	     fabigato-owned directory under it (commit 7dc0ca0) fixed the files but not
+	     the directory.
+
+	     Everything is under /usr/local/var/log now: owned fabigato:staff, outside
+	     what the macOS installer manages, and `mkdir -p`'d by the wrapper on every
+	     start. With no log path in this plist, broken logging degrades logging
+	     instead of taking the service down. -->
 
 	<key>WorkingDirectory</key>
 	<string>/usr/local/var/copyparty</string>

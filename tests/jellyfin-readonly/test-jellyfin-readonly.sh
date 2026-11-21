@@ -48,7 +48,7 @@ DATASETS="tank/media tank/my_media"
 PREFIX=test-jfro
 STATE=/tmp/jellyfin-readonly.snap
 JF=http://127.0.0.1:8096
-JF_LOGS=/var/log/jellyfin
+JF_LOGS=/usr/local/var/log/jellyfin
 
 # The marker the scan guard counts. Jellyfin logs this once per completed run of
 # the "Scan Media Library" scheduled task, whether it was triggered by the API,
@@ -138,7 +138,7 @@ cmd_scan() {
 	[ "$code" = "204" ] || { echo "scan request returned HTTP $code (expected 204)" >&2; exit 1; }
 
 	echo "scan triggered. It runs asynchronously — watch"
-	echo "  tail -f /var/log/jellyfin/log_*.log"
+	echo "  tail -f /usr/local/var/log/jellyfin/log_*.log"
 	echo "and wait for the library scan to complete before running 'verify'."
 }
 

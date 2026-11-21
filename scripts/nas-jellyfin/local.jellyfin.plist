@@ -69,14 +69,15 @@
 	<key>ExitTimeOut</key>
 	<integer>60</integer>
 
-	<!-- The wrapper's own guard messages go to /var/log/jellyfin-server/wrapper.log;
-	     the server's own logs go to /var/log/jellyfin/ via -l, where Jellyfin rotates
-	     them itself (daily, 3 retained). This file therefore only catches console
-	     output, which config-seed/logging.json holds down to Warning.
+	<!-- The wrapper's own guard messages go to
+	     /usr/local/var/log/jellyfin-server/wrapper.log; the server's own logs go to
+	     /usr/local/var/log/jellyfin/ via -l, where Jellyfin rotates them itself
+	     (daily, 3 retained). console.log, beside wrapper.log, catches console
+	     output only, which config-seed/logging.json holds down to Warning.
 
 	     Measured, not assumed: that is ~6 lines per start, not zero. Five are
 	     MediaEncoder complaining that scale_cuda, tonemap_cuda, overlay_vaapi,
-	     overlay_vulkan and overlay_cuda are unavailable — it probes for every
+	     overlay_vulkan and overlay_cuda are unavailable -- it probes for every
 	     hwaccel backend it knows and reports the ones this build has no hardware
 	     for, which on Apple silicon is all of them except VideoToolbox. One is
 	     StaticFileMiddleware noting there is no ASP.NET `wwwroot` beside the
@@ -86,41 +87,40 @@
 	     So the signal is "more than the usual six", not "non-empty". First start
 	     also adds EF Core migration warnings that do not recur.
 
-	     Both of this daemon's logs live in a DIRECTORY owned by fabigato rather
-	     than directly in /var/log, and that is load-bearing. launchd opens
-	     StandardOutPath as the job's user (fabigato, per UserName above) BEFORE it
-	     execs the program, so when the file is missing and the parent is not
-	     writable by that user the spawn fails with EX_CONFIG (78) before the
-	     wrapper ever runs. Nothing is logged anywhere, because the thing that
-	     failed is the opening of the log itself; `launchctl print` shows only
-	     `job state = spawn failed` against a climbing `runs` counter.
+	     NO StandardOutPath / StandardErrorPath, deliberately. launchd opens those
+	     paths as the job's user (fabigato, per UserName above) BEFORE it execs the
+	     program, so a missing file under a parent that user cannot write is an
+	     EX_CONFIG (78) spawn failure before the wrapper ever runs. Nothing is
+	     logged anywhere, because the thing that failed is the opening of the log
+	     itself; `launchctl print` shows only `job state = spawn failed` against a
+	     climbing `runs` counter.
 
-	     That is not hypothetical. On 2026-11-21 something swept /var/log and
-	     deleted both of these files. /var/log is root:wheel 0755, so launchd could
-	     not recreate them as fabigato, and Jellyfin and copyparty were both down
-	     for ~4 h across ~3400 silent KeepAlive retries. See nas_log.md.
+	     That is not hypothetical. Something swept /var/log around the macOS 27.2.1
+	     update on 2026-11-20 and deleted these files. /var/log is root:wheel 0755,
+	     so launchd could not recreate them as fabigato; this daemon, copyparty and
+	     the LM Studio daemon all sat in silent KeepAlive loops, the last of them
+	     for ~29 h. Moving the files into a fabigato-owned directory under /var/log
+	     (commit 7dc0ca0) fixed the files but not the directory -- nothing running
+	     as fabigato can recreate a directory in a root-owned /var/log either.
 
-	     newsyslog does not save you here. The `C` flag in
-	     /etc/newsyslog.d/jellyfin.conf means "eligible for creation when newsyslog
-	     is invoked with -C", which the repo README already states; Apple's
-	     com.apple.newsyslog job runs plain `/usr/sbin/newsyslog` (hourly, at :30)
-	     with no -C. The README calls a plain run skipping a missing file normal,
-	     and for the root-owned logs in tank.conf it is. It is not normal here: for
-	     a daemon with a non-root UserName, the missing file is what stops the
-	     daemon from starting at all. `newsyslog -C` remains the right thing at
-	     install time; what makes recreation automatic from now on is the
-	     fabigato-owned parent directory, which lets launchd create the file itself
-	     on the next spawn so the daemon heals with no intervention.
+	     So logging is the wrapper's job now. jellyfin-server.sh `mkdir -p`s what it
+	     needs under /usr/local/var/log, which is owned fabigato:staff and which the
+	     macOS installer does not manage, and redirects its own stdout/stderr into
+	     console.log before `exec`ing the server, which inherits them. The redirect
+	     is guarded: if it cannot be made, Jellyfin still starts and only the
+	     console capture is lost. Broken logging degrades logging instead of taking
+	     the service down.
 
-	     Why a new directory and not /var/log/jellyfin/, which is already
-	     fabigato-owned: Jellyfin owns that one and prunes it
-	     (LogFileRetentionDays=3 plus Serilog's own 3-file rotation), so a launchd
-	     log parked there would eventually be unlinked under an open descriptor and
-	     the output would vanish into a deleted inode until the next restart. -->
-	<key>StandardOutPath</key>
-	<string>/var/log/jellyfin-server/launchd.log</string>
-	<key>StandardErrorPath</key>
-	<string>/var/log/jellyfin-server/launchd.log</string>
+	     newsyslog never covered this. Its `C` flag means "eligible for creation
+	     when newsyslog is invoked with -C", and Apple's com.apple.newsyslog job
+	     runs plain `/usr/sbin/newsyslog` (hourly, at :30) with no -C. Nothing
+	     depends on it now.
+
+	     Why console.log is not inside /usr/local/var/log/jellyfin/, which the
+	     wrapper also creates: Jellyfin owns that directory and prunes it
+	     (LogFileRetentionDays=3 plus Serilog's own 3-file rotation), so a log
+	     parked there would eventually be unlinked under an open descriptor and the
+	     output would vanish into a deleted inode until the next restart. -->
 
 	<!-- Without this the daemon inherits / as its working directory. Harmless
 	     for the server, which is given every path it needs as a flag, but it

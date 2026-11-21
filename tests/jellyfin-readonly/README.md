@@ -142,7 +142,7 @@ Play something that forces a transcode (change the quality selector to a lower
 bitrate), then:
 
 ```sh
-grep -i videotoolbox /var/log/jellyfin/log_*.log | tail -5
+grep -i videotoolbox /usr/local/var/log/jellyfin/log_*.log | tail -5
 ```
 
 The ffmpeg command line Jellyfin logs should contain `-hwaccel videotoolbox` and

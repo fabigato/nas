@@ -100,7 +100,7 @@ JF_ROOT=/usr/local/var/jellyfin
 JF_CONFIG="$JF_ROOT/config"
 JF_DATA="$JF_ROOT/data"
 JF_CACHE="$JF_ROOT/cache"
-JF_LOGDIR=/var/log/jellyfin
+JF_LOGDIR=/usr/local/var/log/jellyfin
 
 # Not passed as a flag — it comes from TranscodingTempPath in encoding.xml —
 # but checked here anyway. Jellyfin creates this directory itself at startup and
@@ -113,11 +113,15 @@ JF_LOGDIR=/var/log/jellyfin
 # turns that into one line in this log.
 JF_TRANSCODES="$JF_ROOT/transcodes"
 
-# In a fabigato-owned directory, not directly in /var/log: log() appends as
-# fabigato and cannot create a file in a root-owned /var/log, and the same
-# constraint on launchd's StandardOutPath is what took this daemon down on
-# 2026-11-21. See the long note in local.jellyfin.plist.
-LOG=/var/log/jellyfin-server/wrapper.log
+# Logging is this script's job, not launchd's: the plist deliberately sets no
+# StandardOutPath, because launchd opening it as fabigato before exec is what
+# took this daemon down after the macOS 27.2.1 update swept /var/log. See the
+# long note in local.jellyfin.plist. /usr/local/var/log is owned fabigato:staff
+# and /usr/local is untouched by the macOS installer, so every directory below
+# can be recreated from here.
+JF_LOGS=/usr/local/var/log/jellyfin-server
+LOG="$JF_LOGS/wrapper.log"         # this wrapper's own guard messages
+CONSOLE="$JF_LOGS/console.log"     # the server's console, ~6 lines per start
 
 # How long to wait for the pool before giving up and letting launchd retry.
 # Longer than the boot unlock's own 120 s poll, because at boot this daemon and
@@ -136,6 +140,20 @@ fail() {
 	exit "${2:-1}"
 }
 
+# --- our own logging ------------------------------------------------------
+# Before anything that logs. Both directories are ours to create: nothing else
+# does it now that the plist has no StandardOutPath, and a sweep of the log tree
+# must not be able to stop the server.
+mkdir -p "$JF_LOGS" "$JF_LOGDIR" 2>/dev/null
+
+# The server inherits our stdout/stderr, so this is what captures its console.
+# Guarded on purpose: if the redirect cannot be made, Jellyfin still starts and
+# only the console capture is lost, rather than the shell dying on a failed
+# redirect and taking the service with it.
+if : >>"$CONSOLE" 2>/dev/null; then
+	exec >>"$CONSOLE" 2>&1
+fi
+
 log "--- starting (pid $$, uid $(id -u), user $(id -un)) ---"
 
 # --- install sanity -------------------------------------------------------
@@ -146,10 +164,16 @@ log "--- starting (pid $$, uid $(id -u), user $(id -un)) ---"
 [ -x "$JF_FFMPEG" ] || fail "bundled ffmpeg missing: $JF_FFMPEG" 2
 [ -d "$JF_WEB" ]    || fail "web client missing: $JF_WEB" 2
 
-for d in "$JF_ROOT" "$JF_CONFIG" "$JF_DATA" "$JF_CACHE" "$JF_LOGDIR"; do
+for d in "$JF_ROOT" "$JF_CONFIG" "$JF_DATA" "$JF_CACHE"; do
 	[ -d "$d" ] || fail "state directory missing: $d (run the install steps)" 2
 	[ -w "$d" ] || fail "state directory not writable by $(id -un): $d" 2
 done
+
+# JF_LOGDIR is deliberately NOT in that loop. It is a log directory, and a
+# missing or unwritable log directory must never be a reason to refuse to serve
+# media: it is created above and only warned about here. The server logs to its
+# console either way, which is what console.log is for.
+[ -w "$JF_LOGDIR" ] || log "WARNING: $JF_LOGDIR not writable; server logs will be console only"
 
 # JF_ROOT above is what makes this recoverable rather than fatal: the transcode
 # directory is deleted by a scheduled task and recreated on demand, so it is

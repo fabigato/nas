@@ -65,10 +65,10 @@ log under `/var/log/` and communicates its outcome through its exit code, so
 stand.
 
 The two daemons that run as `fabigato` rather than root — `local.jellyfin` and
-`local.copyparty` — write theirs one level down, in `/var/log/jellyfin-server/`
-and `/var/log/copyparty-server/`. That is a requirement, not tidiness: launchd
-must be able to *create* the file as that user. See [Log paths for the non-root
-daemons](#log-paths-for-the-non-root-daemons).
+`local.copyparty` — are the exception: their logs are under
+`/usr/local/var/log/`, and their plists name no log path at all, because launchd
+opening one as a non-root user is a way to stop a service that cannot log why.
+See [Log paths for the non-root daemons](#log-paths-for-the-non-root-daemons).
 
 Two more daemons exist and are documented in their own sections because they are
 not about keeping the pool healthy: [`local.tank-offsite`](#the-offsite-copy--bootstrap-offsitesh-then-tank-offsitesh)
@@ -541,11 +541,11 @@ announce themselves:
 Exposure is `tailscale serve`, never `tailscale funnel`, on its own port —
 `:8443` already belongs to ComfyUI.
 
-**Its own two logs live in `/var/log/jellyfin-server/`**, not directly in
-`/var/log`, which is load-bearing rather than cosmetic — see [Log paths for the
-non-root daemons](#log-paths-for-the-non-root-daemons). The *server's* logs are a
-separate thing and stay in `/var/log/jellyfin/`, where Serilog rotates them
-itself.
+**Its own two logs live in `/usr/local/var/log/jellyfin-server/`**, not in
+`/var/log`, and the plist names no log path at all — load-bearing rather than
+cosmetic, see [Log paths for the non-root
+daemons](#log-paths-for-the-non-root-daemons). The *server's* logs are a separate
+thing, in `/usr/local/var/log/jellyfin/`, where Serilog rotates them itself.
 
 ## Copyparty — `local.copyparty`
 
@@ -571,9 +571,10 @@ leftover files would then block the real dataset from mounting.
 
 **Nothing but uploads goes to `tank`.** The upload database and thumbnails are
 under `/usr/local/var/copyparty/hist`; request logs are monthly files in
-`/var/log/copyparty/`. The wrapper's guard log and launchd's capture of stdout
-are separate from those, in `/var/log/copyparty-server/` — see [Log paths for the
-non-root daemons](#log-paths-for-the-non-root-daemons).
+`/usr/local/var/log/copyparty/`. The wrapper's guard log and its capture of
+copyparty's console are separate from those, in
+`/usr/local/var/log/copyparty-server/` — see [Log paths for the non-root
+daemons](#log-paths-for-the-non-root-daemons).
 
 **Secrets.** `copyparty.conf` has none and is installed as-is. The password is
 `pass` entry `copyparty/fabian`; `make-accounts.sh` writes only its argon2 hash
@@ -615,7 +616,8 @@ when `newsyslog` is invoked with `-C`", not "create automatically" — a plain r
 skipping a file that doesn't exist yet is normal. Apple's `com.apple.newsyslog`
 job runs plain `/usr/sbin/newsyslog`, hourly at `:30`, so nothing ever recreates
 a deleted log on its own. For the root-owned logs above that costs you nothing.
-For the two daemons below it is the difference between running and not.
+For the two daemons below it once made the difference between running and not;
+the section explains what replaced it.
 
 ### Log paths for the non-root daemons
 
@@ -637,30 +639,54 @@ launchctl print system/local.jellyfin | grep -E 'state|runs|last exit'
 #   job state = spawn failed
 ```
 
-So both log into a directory owned by the service user instead:
+**This is not theoretical.** Something swept `/var/log` around the macOS 27.2.1
+update on 2026-11-20. Jellyfin, copyparty and the LM Studio daemon in
+`local_llm` all stayed down with nothing anywhere saying why — the last of them
+for ~29 h across 3596 silent retries. Write-up in `nas_log.md`.
+
+The first fix, commit `7dc0ca0`, moved the files into fabigato-owned directories
+under `/var/log`. That heals a deleted *file* — launchd recreates it on the next
+spawn — but not a deleted *directory*, because nothing running as fabigato can
+create one in a root-owned `/var/log` either. So the arrangement now has two
+parts.
+
+**1. No log path in the plist.** Neither plist sets `StandardOutPath` or
+`StandardErrorPath` any more. launchd has nothing to open, so it cannot fail to
+start a service over a log file. Each wrapper redirects its own stdout/stderr
+into `console.log` before it `exec`s the server, which inherits them, and the
+redirect is guarded: if it cannot be made, the server starts anyway and only the
+console capture is lost. Broken logging degrades logging.
+
+**2. Logs under a tree fabigato owns end to end.** Everything moved out of
+`/var/log` to `/usr/local/var/log/`, which the macOS installer does not manage:
+
+| Log | Path |
+| --- | --- |
+| Jellyfin wrapper, console | `/usr/local/var/log/jellyfin-server/{wrapper,console}.log` |
+| Jellyfin server, Serilog via `-l` | `/usr/local/var/log/jellyfin/` |
+| copyparty wrapper, console | `/usr/local/var/log/copyparty-server/{wrapper,console}.log` |
+| copyparty requests, via `lo` | `/usr/local/var/log/copyparty/` |
+| LM Studio wrapper, console | `/usr/local/var/log/llmster/{wrapper,console}.log` |
+
+Each wrapper `mkdir -p`s its own directories on every start, so a sweep of the
+log tree now costs the old logs and nothing else.
 
 ```sh
-sudo install -d -o fabigato -g staff -m 755 /var/log/jellyfin-server /var/log/copyparty-server
+sudo install -d -o fabigato -g staff -m 755 /usr/local/var/log
 sudo install -m 644 -o root -g wheel scripts/nas-jellyfin/jellyfin.newsyslog.conf /etc/newsyslog.d/jellyfin.conf
 sudo install -m 644 -o root -g wheel scripts/nas-copyparty/copyparty.newsyslog.conf /etc/newsyslog.d/copyparty.conf
 sudo newsyslog -C -f /etc/newsyslog.d/jellyfin.conf
 sudo newsyslog -C -f /etc/newsyslog.d/copyparty.conf
 ```
 
-With the parent directory writable by that user, launchd recreates a deleted log
-itself on the next spawn, and the daemon heals unattended. That is the whole
-point of the arrangement: it survives a `/var/log` sweep, which the `C` flag does
-not protect against.
+The `C` flag still creates nothing on Apple's hourly plain run; it is there for
+a hand-run `newsyslog -C` at install time. Recreation is the wrappers' job now.
 
-**This is not theoretical.** On 2026-11-21 something emptied `/var/log` and both
-servers stayed down for about four hours across ~3400 silent `KeepAlive`
-retries, with no log anywhere saying why. Write-up in `nas_log.md`.
-
-Not `/var/log/jellyfin/` or `/var/log/copyparty/`, which already exist and are
-already fabigato-owned: those belong to the servers themselves. Jellyfin prunes
-its directory on `LogFileRetentionDays` and Serilog rotates inside it, so a
-launchd log parked there would eventually be unlinked under an open descriptor
-and its output would vanish into a deleted inode until the next restart.
+`console.log` deliberately does not live inside the servers' own log
+directories, which the wrappers also create. Jellyfin prunes its directory on
+`LogFileRetentionDays` and Serilog rotates inside it, so a log parked there would
+eventually be unlinked under an open descriptor and its output would vanish into
+a deleted inode until the next restart.
 
 Rollback is symmetrical:
 
