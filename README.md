@@ -74,8 +74,14 @@ Two more daemons exist and are documented in their own sections because they are
 not about keeping the pool healthy: [`local.tank-offsite`](#the-offsite-copy--bootstrap-offsitesh-then-tank-offsitesh)
 and [`local.jellyfin`](#jellyfin--localjellyfin). They follow the same
 conventions. So does `local.hermes-backup` (01:00 nightly, ahead of the
-off-site run), documented in [its own README](scripts/hermes-backup/README.md). `tank-backup.sh` is the odd one out — deliberately **not** a daemon,
-because the drive it writes to is meant to be unplugged.
+off-site run), documented in [its own README](scripts/hermes-backup/README.md).
+`tank-backup.sh` is the odd one out — deliberately **not** a daemon, because the
+drive it writes to is meant to be unplugged.
+
+And one daemon watches the others: `local.daemon-watch`, every 5 minutes, which
+notifies the same channel when Jellyfin, copyparty or the LM Studio server stops
+answering. It exists because the 2026-11-20 log sweep took all three down for
+28–29 h and nothing noticed — [its own README](scripts/nas-daemon-watch/README.md).
 
 ### Boot unlock — `local.tank-boot-unlock`
 

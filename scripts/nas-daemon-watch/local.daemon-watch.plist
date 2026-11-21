@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.daemon-watch</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/sbin/daemon-watch.sh</string>
+	</array>
+
+	<!-- Runs as root, with no UserName key. Not for launchctl, which a plain
+	     user can read, but for the webhook URL: /etc/zfs/zed.d/zed.rc is mode
+	     0600 root:wheel, and delivery is deliberately configured in exactly one
+	     place (see notify() in the script). -->
+
+	<!-- Every 5 minutes, then exit. Not KeepAlive: this is a one-shot check, and
+	     KeepAlive would read a normal exit as something to restart.
+	     StartInterval rather than StartCalendarInterval because the cadence is
+	     "often", not "at a time".
+
+	     Known limit, same as every timed job on this machine: it does not fire
+	     while the Mac sleeps. launchd runs a missed interval on wake, so a
+	     service that died during sleep is reported shortly after the machine is
+	     back rather than at the moment it died. Acceptable — nothing is serving
+	     anything while it sleeps either. -->
+	<key>StartInterval</key>
+	<integer>300</integer>
+
+	<!-- Check once at boot too, which is when the failure this exists for
+	     happens: the 2026-11-20 sweep broke all three daemons at the first boot
+	     after the update. Cheap: three loopback requests. -->
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<false/>
+
+	<!-- Three curl calls and some awk, never urgent. -->
+	<key>ProcessType</key>
+	<string>Background</string>
+
+	<!-- NO StandardOutPath / StandardErrorPath, deliberately, and this one is
+	     not merely consistency: this job is the alarm for the exact failure that
+	     a log path in a plist causes.
+
+	     launchd opens those paths BEFORE it execs the program, so a missing file
+	     under a parent the job's user cannot write is an EX_CONFIG (78) spawn
+	     failure with nothing logged to explain it. That is what took
+	     local.jellyfin, local.copyparty and com.local.llmster down on
+	     2026-11-20, silently, for 28-29 h. See nas_log, "Logs out of /var/log
+	     entirely (2026-11-21)".
+
+	     A watchman that can be killed by its own log file is worse than no
+	     watchman, because its silence reads as good news. daemon-watch.sh
+	     creates /usr/local/var/log/daemon-watch itself and guards its own
+	     redirect, so it starts whether or not it can log. The weekly heartbeat
+	     is the other half of that: if the channel goes quiet, something is
+	     wrong with the watchman, not with the services. -->
+
+	<!-- NO WorkingDirectory either, and that one is measured rather than
+	     reasoned. The first install of this daemon carried
+	     `WorkingDirectory /usr/local/var/daemon-watch`, a directory the script
+	     creates on its first run — so it did not exist yet when launchd tried to
+	     chdir into it, and the job failed to spawn with the same EX_CONFIG (78)
+	     and the same silence:
+
+	       Unable to set current working directory.
+	       path = /usr/local/var/daemon-watch, error 0x2 - No such file or directory
+
+	     Same class of bug as StandardOutPath, in the daemon written to catch it,
+	     found 90 seconds after installing it. The rule is not "do not name a log
+	     file in a plist": it is that **every filesystem path in a plist is a
+	     path launchd touches before your code runs, and anything it cannot do
+	     there is an unexplained spawn failure.** The script uses absolute paths
+	     throughout and needs no particular working directory, so it names none
+	     and inherits /. -->
+</dict>
+</plist>
