@@ -50,7 +50,9 @@ CPP_ACCOUNTS="$CPP_ROOT/accounts.conf"
 CPP_HIST="$CPP_ROOT/hist"
 CPP_LOGDIR=/var/log/copyparty
 
-LOG=/var/log/copyparty-server.log
+# In a fabigato-owned directory, not directly in /var/log — see the note in
+# local.jellyfin.plist.
+LOG=/var/log/copyparty-server/wrapper.log
 
 # Longer than the boot unlock's own 120 s poll, as in jellyfin-server.sh: both
 # start together at boot and the unlock has to finish first.

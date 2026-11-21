@@ -69,8 +69,8 @@
 	<key>ExitTimeOut</key>
 	<integer>60</integer>
 
-	<!-- The wrapper's own guard messages go to /var/log/jellyfin-server.log; the
-	     server's own logs go to /var/log/jellyfin/ via -l, where Jellyfin rotates
+	<!-- The wrapper's own guard messages go to /var/log/jellyfin-server/wrapper.log;
+	     the server's own logs go to /var/log/jellyfin/ via -l, where Jellyfin rotates
 	     them itself (daily, 3 retained). This file therefore only catches console
 	     output, which config-seed/logging.json holds down to Warning.
 
@@ -84,11 +84,43 @@
 	     explicitly with -w.
 
 	     So the signal is "more than the usual six", not "non-empty". First start
-	     also adds EF Core migration warnings that do not recur. -->
+	     also adds EF Core migration warnings that do not recur.
+
+	     Both of this daemon's logs live in a DIRECTORY owned by fabigato rather
+	     than directly in /var/log, and that is load-bearing. launchd opens
+	     StandardOutPath as the job's user (fabigato, per UserName above) BEFORE it
+	     execs the program, so when the file is missing and the parent is not
+	     writable by that user the spawn fails with EX_CONFIG (78) before the
+	     wrapper ever runs. Nothing is logged anywhere, because the thing that
+	     failed is the opening of the log itself; `launchctl print` shows only
+	     `job state = spawn failed` against a climbing `runs` counter.
+
+	     That is not hypothetical. On 2026-11-21 something swept /var/log and
+	     deleted both of these files. /var/log is root:wheel 0755, so launchd could
+	     not recreate them as fabigato, and Jellyfin and copyparty were both down
+	     for ~4 h across ~3400 silent KeepAlive retries. See nas_log.md.
+
+	     newsyslog does not save you here. The `C` flag in
+	     /etc/newsyslog.d/jellyfin.conf means "eligible for creation when newsyslog
+	     is invoked with -C", which the repo README already states; Apple's
+	     com.apple.newsyslog job runs plain `/usr/sbin/newsyslog` (hourly, at :30)
+	     with no -C. The README calls a plain run skipping a missing file normal,
+	     and for the root-owned logs in tank.conf it is. It is not normal here: for
+	     a daemon with a non-root UserName, the missing file is what stops the
+	     daemon from starting at all. `newsyslog -C` remains the right thing at
+	     install time; what makes recreation automatic from now on is the
+	     fabigato-owned parent directory, which lets launchd create the file itself
+	     on the next spawn so the daemon heals with no intervention.
+
+	     Why a new directory and not /var/log/jellyfin/, which is already
+	     fabigato-owned: Jellyfin owns that one and prunes it
+	     (LogFileRetentionDays=3 plus Serilog's own 3-file rotation), so a launchd
+	     log parked there would eventually be unlinked under an open descriptor and
+	     the output would vanish into a deleted inode until the next restart. -->
 	<key>StandardOutPath</key>
-	<string>/var/log/jellyfin-server.launchd.log</string>
+	<string>/var/log/jellyfin-server/launchd.log</string>
 	<key>StandardErrorPath</key>
-	<string>/var/log/jellyfin-server.launchd.log</string>
+	<string>/var/log/jellyfin-server/launchd.log</string>
 
 	<!-- Without this the daemon inherits / as its working directory. Harmless
 	     for the server, which is given every path it needs as a flag, but it

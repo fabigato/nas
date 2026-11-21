@@ -45,11 +45,19 @@
 	</dict>
 
 	<!-- Request logs go to /var/log/copyparty/ via `lo` in the config, and the
-	     config sets `q`, so this file only catches startup errors and crashes. -->
+	     config sets `q`, so this file only catches startup errors and crashes.
+
+	     In a fabigato-owned DIRECTORY, not directly in /var/log, for the reason
+	     spelled out at length in local.jellyfin.plist: launchd opens this path as
+	     the job's user before exec, /var/log is root:wheel 0755, and a missing file
+	     there is an unrecoverable EX_CONFIG (78) spawn failure with no log output
+	     to explain it. Both daemons went down that way on 2026-11-21. Not
+	     /var/log/copyparty/ either — copyparty names its own request logs by month
+	     in there and that directory is its property, not launchd's. -->
 	<key>StandardOutPath</key>
-	<string>/var/log/copyparty-server.launchd.log</string>
+	<string>/var/log/copyparty-server/launchd.log</string>
 	<key>StandardErrorPath</key>
-	<string>/var/log/copyparty-server.launchd.log</string>
+	<string>/var/log/copyparty-server/launchd.log</string>
 
 	<key>WorkingDirectory</key>
 	<string>/usr/local/var/copyparty</string>

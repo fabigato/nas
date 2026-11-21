@@ -113,7 +113,11 @@ JF_LOGDIR=/var/log/jellyfin
 # turns that into one line in this log.
 JF_TRANSCODES="$JF_ROOT/transcodes"
 
-LOG=/var/log/jellyfin-server.log
+# In a fabigato-owned directory, not directly in /var/log: log() appends as
+# fabigato and cannot create a file in a root-owned /var/log, and the same
+# constraint on launchd's StandardOutPath is what took this daemon down on
+# 2026-11-21. See the long note in local.jellyfin.plist.
+LOG=/var/log/jellyfin-server/wrapper.log
 
 # How long to wait for the pool before giving up and letting launchd retry.
 # Longer than the boot unlock's own 120 s poll, because at boot this daemon and
