@@ -278,6 +278,51 @@ space. Note that Deep Archive bills a 180-day minimum per object, so deleting
 anything sooner than that frees no money — only space you were going to stop
 paying for anyway.
 
+### Retention: forget old snapshots, quarterly, by hand
+
+Deleting a file from `tank` does not delete it here. The next snapshot no longer
+has it, but every older snapshot still does, and its data is kept until the last
+of those is forgotten. So retention is applied per snapshot, never per file:
+
+```sh
+sudo /usr/local/sbin/tank-offsite.sh --prune --dry-run      # what it would forget
+sudo -v
+pass show nas/offsite-prune-aws | sudo /usr/local/sbin/tank-offsite.sh --prune
+```
+
+The policy is **the last 4 weekly and the last 4 monthly snapshots of each
+target** (`restic forget --group-by paths --keep-weekly 4 --keep-monthly 4`),
+then `prune --max-repack-size 0`. The newest snapshot of a target is always
+kept. In practice a deleted file stops being restorable about 4 months after
+you delete it.
+
+**Until a target has 4 months of history, its oldest snapshot is kept too.**
+Since restic 0.17, a policy that has fewer buckets than it asks for also keeps
+the oldest snapshot. The repository started on 2026-09-30, so the seed
+snapshots survive every `--prune` until a fifth month has a snapshot, around
+January 2027. Nothing they reference is freed before then.
+
+- **It is manual on purpose.** Forgetting needs the prune credential, and that
+  key is not on this machine (see the threat model). Running it from the
+  nightly job would put it there.
+- **The nightly job reminds you.** When no `--prune` has completed in 90 days it
+  posts to Discord, at most once a week, until you run one. The last run is
+  in `/var/lib/tank-offsite/prune.last`, and the log has `retention prune`
+  lines.
+- **It asks first.** It shows restic's keep/remove table, then you type `prune`
+  at the terminal. If nothing is due to be forgotten it records the run and
+  stops without asking.
+- **Space comes back slowly.** Prune only deletes packs that no remaining
+  snapshot uses at all. A pack that is partly live is kept, because repacking
+  it would mean thawing it out of Deep Archive. Deleted objects then stay for
+  180 days as noncurrent versions, and you are billed for them during that time.
+  So a file you delete today costs money for roughly 4 months, plus the time
+  until your next prune, plus 6 months.
+- **Every run takes a snapshot, changed or not.** restic's retention counts
+  snapshots in calendar buckets. If an unchanged folder produced no snapshots,
+  the 4 snapshots kept could span years, and so could the file you deleted.
+  An unchanged snapshot costs a few KB of metadata in Standard.
+
 ## The three things that must survive this machine
 
 The whole point of copy 3 is the Mac being destroyed or stolen. If any of these

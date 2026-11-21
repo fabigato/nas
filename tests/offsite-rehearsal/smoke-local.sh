@@ -471,7 +471,7 @@ echo 999999 >"$T/lock/pid"
 run_offsite --force --only documents; rc=$?
 check "exit code" "$rc" 0
 grep -q 'stale lock' "$T/log" && ok "logged clearing the stale lock" || bad "logged clearing the stale lock"
-if [ "$(nsnaps)" -gt "$before" ] || grep -q 'nothing changed' "$T/log"; then
+if [ "$(nsnaps)" -gt "$before" ]; then
 	ok "the run proceeded"
 else
 	bad "the run proceeded"
@@ -497,7 +497,7 @@ echo "media/typoed-folder 30" >>"$T/conf/targets"
 run_offsite --force; rc=$?
 check "exit code reports a failed target" "$rc" 2
 grep -q 'does not exist' "$T/log" && ok "alert names the missing path" || bad "alert names the missing path"
-if [ "$(nsnaps)" -gt "$before" ] || grep -q 'nothing changed' "$T/log"; then
+if [ "$(nsnaps)" -gt "$before" ]; then
 	ok "the healthy targets were still backed up"
 else
 	bad "the healthy targets were still backed up"
@@ -646,13 +646,24 @@ grep -q 'storage-class check: .* not found — SKIPPED' "$T/log" && ok "says it 
 grep -q 'storage-class:\[skipped\]' "$T/log" && ok "skip is visible in the verdict, not silent" || bad "skip is visible in the verdict, not silent"
 
 echo
-echo "22. An unchanged run writes state and passes"
+echo "22. A backup that names no snapshot still writes state and passes"
 reset_stubs
 STUB_BACKUP_UNCHANGED=1
 : >"$T/log"
 run_offsite --force --only media/concerts; rc=$?
 check "exit code" "$rc" 0
-grep -q 'nothing changed' "$T/log" && ok "really was an unchanged run" || bad "really was an unchanged run"
+grep -q 'named no snapshot' "$T/log" && ok "took the defensive branch" || bad "took the defensive branch"
+
+echo
+echo "22b. An UNCHANGED target still records a snapshot — retention needs one per interval"
+reset_stubs
+before=$(nsnaps)
+: >"$T/restic.calls"
+run_offsite --force --only media/concerts; rc=$?
+check "exit code" "$rc" 0
+check "one new snapshot" "$(nsnaps)" "$((before + 1))"
+grep '^backup ' "$T/restic.calls" | grep -q -- '--skip-if-unchanged' &&
+	bad "backup does not pass --skip-if-unchanged" || ok "backup does not pass --skip-if-unchanged"
 
 PRUNE_CRED='AWS_ACCESS_KEY_ID=AKIAPRUNESTUB
 AWS_SECRET_ACCESS_KEY=prunestub'
@@ -792,6 +803,114 @@ grep '^prune ' "$T/restic.calls" | grep -q -- '-o s3.storage-class=DEEP_ARCHIVE'
 	ok "prune passes s3.storage-class=DEEP_ARCHIVE" || bad "prune passes s3.storage-class=DEEP_ARCHIVE"
 grep -q "dropped $drop_id" "$T/log" && ok "logged dropped" || bad "logged dropped"
 grep -q 'prunestub' "$T/log" && bad "secret never reaches the log" || ok "secret never reaches the log"
+
+# Snapshot groups, one per path.
+ngroups() {
+	RESTIC_REPOSITORY="$T/repo" RESTIC_PASSWORD_FILE="$T/conf/repo.pass" \
+		"$RESTIC_BIN" snapshots --json 2>/dev/null | /usr/bin/jq '[.[].paths | join(",")] | unique | length'
+}
+# What 4 weekly + 4 monthly keeps when every snapshot is from the same week:
+# the newest of each group, plus the OLDEST, because since 0.17 restic keeps
+# the oldest snapshot while a policy has fewer buckets than it asks for. So
+# min(n, 2) per group. On the real repo this means the seed is kept until
+# there are 4 months of history.
+nkeep() {
+	RESTIC_REPOSITORY="$T/repo" RESTIC_PASSWORD_FILE="$T/conf/repo.pass" \
+		"$RESTIC_BIN" snapshots --json 2>/dev/null |
+		/usr/bin/jq '[group_by(.paths | join(","))[] | [length, 2] | min] | add'
+}
+
+echo
+echo "31. --prune --dry-run shows the plan and forgets nothing, no credential needed"
+reset_stubs
+before=$(nsnaps)
+groups=$(ngroups)
+keep=$(nkeep)
+: >"$T/restic.calls"
+run_offsite --prune --dry-run </dev/null; rc=$?
+check "exit code" "$rc" 0
+grep -q "would forget $((before - keep)) snapshot(s)" "$T/stdout" && ok "counts what it would forget" || bad "counts what it would forget"
+grep '^forget ' "$T/restic.calls" | grep -qv -- '--dry-run' && bad "no real forget ran" || ok "no real forget ran"
+check "nothing forgotten" "$(nsnaps)" "$before"
+[ -f "$T/state/prune.last" ] && bad "dry run records no prune" || ok "dry run records no prune"
+
+echo
+echo "32. --prune with the wrong confirmation does nothing"
+reset_stubs
+echo nope >"$T/tty"
+printf '%s\n' "$PRUNE_CRED" | run_offsite --prune; rc=$?
+check "exit code" "$rc" 1
+grep -q 'confirmation did not match' "$T/log" && ok "says why" || bad "says why"
+check "nothing forgotten" "$(nsnaps)" "$before"
+
+echo
+echo "33. --prune without the prune credential refuses"
+reset_stubs
+echo prune >"$T/tty"
+printf '' | run_offsite --prune; rc=$?
+check "exit code" "$rc" 1
+grep -q 'stdin did not hold' "$T/log" && ok "says what stdin was missing" || bad "says what stdin was missing"
+cat "$T/conf/backup.env" | run_offsite --prune; rc=$?
+check "backup credential: exit code" "$rc" 1
+check "nothing forgotten" "$(nsnaps)" "$before"
+
+echo
+echo "34. A forget that fails stops --prune — no prune, no record"
+reset_stubs
+STUB_FORGET_FAIL=1
+printf '%s\n' "$PRUNE_CRED" | run_offsite --prune; rc=$?
+check "exit code" "$rc" 2
+grep -q 'PRUNE RAN' "$T/stdout" && bad "prune did not run" || ok "prune did not run"
+[ -f "$T/state/prune.last" ] && bad "no prune recorded" || ok "no prune recorded"
+
+echo
+echo "35. --prune keeps the newest (and, while history is short, oldest) snapshot of every target"
+reset_stubs
+: >"$T/restic.calls"
+printf '%s\n' "$PRUNE_CRED" | run_offsite --prune; rc=$?
+check "exit code" "$rc" 0
+check "newest + oldest left per target" "$(nsnaps)" "$keep"
+check "every target still has a snapshot" "$(ngroups)" "$groups"
+grep '^forget ' "$T/restic.calls" | grep -v -- '--dry-run' |
+	grep -q -- '--group-by paths --keep-weekly 4 --keep-monthly 4' &&
+	ok "forget applies 4 weekly + 4 monthly per path" || bad "forget applies 4 weekly + 4 monthly per path"
+grep '^prune ' "$T/restic.calls" | grep -q -- '--max-repack-size 0' &&
+	ok "prune never repacks (no thaw)" || bad "prune never repacks (no thaw)"
+grep '^prune ' "$T/restic.calls" | grep -q -- '-o s3.storage-class=DEEP_ARCHIVE' &&
+	ok "prune passes s3.storage-class=DEEP_ARCHIVE" || bad "prune passes s3.storage-class=DEEP_ARCHIVE"
+[ -f "$T/state/prune.last" ] && ok "records the prune" || bad "records the prune"
+grep -q 'prunestub' "$T/log" && bad "secret never reaches the log" || ok "secret never reaches the log"
+
+echo
+echo "36. A second --prune has nothing to forget, asks nothing, still reclaims"
+reset_stubs
+: >"$T/tty"
+: >"$T/restic.calls"
+printf '%s\n' "$PRUNE_CRED" | run_offsite --prune; rc=$?
+check "exit code" "$rc" 0
+grep -q 'Nothing to forget' "$T/stdout" && ok "says so" || bad "says so"
+grep -q 'Type prune' "$T/stdout" && bad "did not ask for confirmation" || ok "did not ask for confirmation"
+grep -q '^prune ' "$T/restic.calls" && ok "prune still ran" || bad "prune still ran"
+
+echo
+echo "37. The nightly run reminds when retention is overdue — weekly, not nightly"
+reset_stubs
+: >"$T/log"
+run_offsite; rc=$?
+check "exit code" "$rc" 0
+grep -q 'retention prune overdue' "$T/log" && bad "fresh prune: no reminder" || ok "fresh prune: no reminder"
+echo 1000 >"$T/state/prune.last"; rm -f "$T/state/prune.nagged"
+: >"$T/log"
+run_offsite; rc=$?
+check "exit code unaffected" "$rc" 0
+grep -q 'retention prune overdue' "$T/log" && ok "overdue: reminds" || bad "overdue: reminds"
+: >"$T/log"
+run_offsite; rc=$?
+grep -q 'retention prune overdue' "$T/log" && bad "next night: stays quiet" || ok "next night: stays quiet"
+rm -f "$T/state/prune.last" "$T/state/prune.nagged"
+: >"$T/log"
+run_offsite; rc=$?
+grep -q 'retention prune overdue (has never run)' "$T/log" && ok "never pruned: reminds" || bad "never pruned: reminds"
 
 echo
 echo "================================================"

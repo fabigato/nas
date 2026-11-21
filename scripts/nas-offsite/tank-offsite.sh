@@ -98,10 +98,29 @@
 # alert gets missed. So: every failure, plus one summary whenever the last
 # summary went out more than 30 days ago.
 #
-# Deliberately NOT hung off "a backup happened". With --skip-if-unchanged, a
-# month in which my_media did not change produces no snapshot — so a heartbeat
-# tied to that would go quiet exactly when everything is fine, inverting the
-# signal. Same trap tank-snapshot.sh documented for the monthly tier.
+# Deliberately NOT hung off "a backup happened". A target that is not due does
+# nothing on 29 nights out of 30, so a heartbeat tied to backups would go quiet
+# exactly when everything is fine, inverting the signal. Same trap
+# tank-snapshot.sh documented for the monthly tier.
+#
+# 7. RETENTION IS PER SNAPSHOT, RUN BY HAND, AND EVERY RUN TAKES A SNAPSHOT.
+#
+# Until 2026-11-22 nothing was ever forgotten, so a file deleted from tank was
+# kept here for good: every older snapshot still referred to it. --prune applies
+# `forget --group-by paths --keep-weekly 4 --keep-monthly 4`, so a deleted file
+# leaves about 4 months after it is deleted.
+#
+# It is manual because forgetting needs the prune credential, and keeping that
+# off this machine is what stops ransomware here from taking copy 3 with it
+# (README, threat model). The nightly job only REMINDS: once 90 days pass
+# without a completed --prune it posts, at most weekly.
+#
+# --skip-if-unchanged was dropped for the same reason. restic's keep-weekly and
+# keep-monthly count snapshots that EXIST in each bucket, so a folder that stops
+# changing would stop producing snapshots, and its "last 4 monthly" could reach
+# back years, along with the files deleted in that time. An unchanged snapshot
+# costs a few KB of metadata in Standard. With one every interval, the window
+# means calendar time.
 #
 # --- USAGE ---------------------------------------------------------------
 #
@@ -123,6 +142,11 @@
 #     sudo sh tank-offsite.sh --fix-classes # put every pack in the class
 #                                           # DESIGN 5 says it belongs in.
 #                                           # Re-run until it says done.
+#   sudo sh tank-offsite.sh --prune --dry-run
+#   pass show nas/offsite-prune-aws |
+#     sudo sh tank-offsite.sh --prune       # apply retention (DESIGN 7): forget
+#                                           # beyond 4 weekly + 4 monthly per
+#                                           # target, then reclaim. Quarterly.
 #
 # Exit codes:
 #   0  ran, or correctly had nothing to do
@@ -198,6 +222,13 @@ LOCKDIR=${TANK_OFFSITE_LOCKDIR:-/var/run/tank-offsite.lock}
 # credential.
 DROP_TTY=${TANK_OFFSITE_DROP_TTY:-/dev/tty}
 
+# Retention, DESIGN 7. Per target (forget --group-by paths).
+KEEP_WEEKLY=${TANK_OFFSITE_KEEP_WEEKLY:-4}
+KEEP_MONTHLY=${TANK_OFFSITE_KEEP_MONTHLY:-4}
+# When the nightly run starts nagging for a --prune, and how often it repeats.
+PRUNE_DUE_DAYS=${TANK_OFFSITE_PRUNE_DUE_DAYS:-90}
+PRUNE_NAG_DAYS=${TANK_OFFSITE_PRUNE_NAG_DAYS:-7}
+
 HEARTBEAT_DAYS=${TANK_OFFSITE_HEARTBEAT_DAYS:-30}
 ZEDRC=${TANK_OFFSITE_ZEDRC:-/etc/zfs/zed.d/zed.rc}
 NOTIFY_MAX_CHARS=1500
@@ -216,6 +247,7 @@ while [ $# -gt 0 ]; do
 	--seed) SEED=1; FORCE=1 ;;
 	--list) MODE=list ;;
 	--fix-classes) MODE=fix-classes ;;
+	--prune) MODE=prune ;;
 	--only)
 		shift
 		[ $# -gt 0 ] || { echo "--only needs a dataset name" >&2; exit 1; }
@@ -452,16 +484,10 @@ export RESTIC_REPOSITORY RESTIC_PASSWORD_FILE RESTIC_CACHE_DIR
 export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 mkdir -p "$RESTIC_CACHE_DIR" 2>/dev/null
 
-# Probe for --skip-if-unchanged rather than assuming the installed restic has
-# it. It landed in 0.17; on an older build the flag is a hard error and every
-# run would fail. Measured, not assumed.
-SKIP_UNCHANGED=
-if "$RESTIC" backup --help 2>&1 | grep -q -- '--skip-if-unchanged'; then
-	SKIP_UNCHANGED=--skip-if-unchanged
-else
-	log "  note: this restic has no --skip-if-unchanged; an unchanged run will"
-	log "        still record a snapshot. Harmless, just less tidy."
-fi
+# No --skip-if-unchanged: every due run records a snapshot, so retention's
+# window is calendar time. See DESIGN 7.
+PRUNE_STATE=$STATE_DIR/prune.last
+PRUNE_NAGGED=$STATE_DIR/prune.nagged
 
 # ------------------------------------------------------------------- guards
 
@@ -595,6 +621,67 @@ if [ "$MODE" = drop ]; then
 	printf '%s\n' "$drop_out" | tee -a "$LOG"
 	[ "$drop_rc" = 0 ] || die "prune after forgetting $DROP_ID failed (rc=$drop_rc) — the snapshot is gone, its data may not be" 2
 	log "  dropped $DROP_ID"
+	exit 0
+fi
+
+# ------------------------------------------------------------------- prune
+
+# Retention, DESIGN 7. The plan is computed with the backup credential (a dry
+# forget deletes nothing), shown, and confirmed at the terminal. Only then is
+# the prune credential read from stdin.
+if [ "$MODE" = prune ]; then
+	set -- --group-by paths --keep-weekly "$KEEP_WEEKLY" --keep-monthly "$KEEP_MONTHLY"
+	log "  retention prune: forget $*"
+	pr_plan=$("$RESTIC" forget --dry-run --json "$@" 2>/dev/null) ||
+		die "--prune: restic could not compute the retention plan — nothing done" 2
+	pr_n=$(printf '%s' "$pr_plan" | "$JQ" '[.[] | (.remove // []) | length] | add // 0' 2>/dev/null)
+	case "$pr_n" in
+	'' | *[!0-9]*) die "--prune: could not read restic's retention plan — nothing done" 2 ;;
+	esac
+	"$RESTIC" forget --dry-run "$@" 2>&1 | sed 's/^/  /'
+	echo
+
+	if [ "$DRY_RUN" = 1 ]; then
+		echo "[dry-run] would forget $pr_n snapshot(s), then prune --max-repack-size 0"
+		exit 0
+	fi
+
+	if [ "$pr_n" = 0 ]; then
+		echo "Nothing to forget: every snapshot is inside the policy."
+		# With the credential piped in, still prune: that reclaims anything a
+		# previous run forgot but failed to delete. Prune removes only data
+		# that no snapshot uses, so it needs no confirmation.
+		if [ ! -t 0 ]; then
+			take_prune_credential --prune
+			pr_out=$("$RESTIC" prune -o s3.storage-class="$STORAGE_CLASS" --max-repack-size 0 2>&1); pr_rc=$?
+			printf '%s\n' "$pr_out" | tee -a "$LOG"
+			[ "$pr_rc" = 0 ] || die "--prune: prune failed (rc=$pr_rc)" 2
+		fi
+		echo "$(now)" >"$PRUNE_STATE"
+		log "  retention prune: nothing to forget"
+		exit 0
+	fi
+
+	echo "About to forget the $pr_n snapshot(s) listed under \"remove\" above. Not reversible."
+	echo "The newest snapshot of every target is kept."
+	# stdin carries the prune credential, so the confirmation comes from the
+	# terminal itself — same as --drop.
+	printf 'Type prune to confirm: '
+	read -r confirm <"$DROP_TTY"
+	[ "$confirm" = prune ] || die "--prune: confirmation did not match — nothing done"
+
+	take_prune_credential --prune
+	# Captured, not piped into tee — see --drop for why.
+	pr_out=$("$RESTIC" forget "$@" 2>&1); pr_rc=$?
+	printf '%s\n' "$pr_out" | tee -a "$LOG"
+	[ "$pr_rc" = 0 ] || die "--prune: forget failed (rc=$pr_rc) — prune not run" 2
+	# Delete-only reclaim, as in --drop: repacking would mean thawing.
+	pr_out=$("$RESTIC" prune -o s3.storage-class="$STORAGE_CLASS" --max-repack-size 0 2>&1); pr_rc=$?
+	printf '%s\n' "$pr_out" | tee -a "$LOG"
+	[ "$pr_rc" = 0 ] ||
+		die "--prune: snapshots forgotten but prune failed (rc=$pr_rc) — run --prune again to reclaim" 2
+	echo "$(now)" >"$PRUNE_STATE"
+	log "  retention prune: forgot $pr_n snapshot(s) and pruned"
 	exit 0
 fi
 
@@ -867,7 +954,6 @@ while read -r TPATH INTERVAL_DAYS; do
 	# A second tag naming the dataset, but only when it adds anything — for a
 	# whole-dataset target the two strings are identical.
 	[ "$DSET" != "$TPATH" ] && set -- "$@" --tag "$DSET"
-	[ -n "$SKIP_UNCHANGED" ] && set -- "$@" "$SKIP_UNCHANGED"
 	# The seed is attended and already a weekend; throttling it to 20 Mbit would
 	# make it 80 hours instead of 54 for no benefit.
 	[ "$SEED" = 0 ] && set -- "$@" --limit-upload "$LIMIT_UP"
@@ -947,11 +1033,12 @@ two runs from writing at once."
 		;;
 	esac
 
-	# "snapshot abc12345 saved". Absent when --skip-if-unchanged decided nothing
-	# changed, which is a success, not a failure.
+	# "snapshot abc12345 saved". Without --skip-if-unchanged a successful backup
+	# always prints it, so this is only defensive: restic exited 0, so record
+	# the run rather than retrying nightly over a line we failed to parse.
 	NEW=$(printf '%s\n' "$OUT" | awk '/snapshot [0-9a-f]+ saved/ { print $2; exit }')
 	if [ -z "$NEW" ]; then
-		log "  $TPATH: nothing changed — no snapshot recorded"
+		log "  $TPATH: restic exited 0 but named no snapshot — none recorded"
 		echo "$(now) $PARENT" >"$STATE"
 		RAN="$RAN $TPATH"
 		continue
@@ -1158,9 +1245,39 @@ if [ -n "$FAILED" ] || [ -n "$WARNED" ]; then
 	exit 2
 fi
 
+# Retention reminder — DESIGN 7. The prune credential is not on this machine,
+# so the most this job can do is ask. Once a week at most, not nightly.
+if [ "$DRY_RUN" = 0 ]; then
+	PR_LAST=$(awk '{print $1; exit}' "$PRUNE_STATE" 2>/dev/null)
+	case "$PR_LAST" in '' | *[!0-9]*) PR_LAST=0 ;; esac
+	PR_AGE=$(( $(now) - PR_LAST ))
+	if [ "$PR_AGE" -gt $((PRUNE_DUE_DAYS * 86400)) ]; then
+		NAG_AGE=$((PRUNE_NAG_DAYS * 86400 + 1))
+		if [ -f "$PRUNE_NAGGED" ]; then
+			NAG_MTIME=$(stat -f %m "$PRUNE_NAGGED" 2>/dev/null || echo 0)
+			NAG_AGE=$(( $(now) - NAG_MTIME ))
+		fi
+		if [ "$NAG_AGE" -gt $((PRUNE_NAG_DAYS * 86400)) ]; then
+			if [ "$PR_LAST" = 0 ]; then
+				PR_WHEN="has never run"
+			else
+				PR_WHEN="last ran $((PR_AGE / 86400)) days ago"
+			fi
+			log "  retention prune overdue ($PR_WHEN) — reminding"
+			notify "tank-offsite: retention prune due on $(hostname -s)" \
+				"The retention prune $PR_WHEN. Until it runs, files deleted from
+$POOL stay in AWS (and billed) in older snapshots.
+
+  sudo $0 --prune --dry-run
+  pass show nas/offsite-prune-aws | sudo $0 --prune"
+			touch "$PRUNE_NAGGED"
+		fi
+	fi
+fi
+
 # Heartbeat on its own clock — see DESIGN 6. Not tied to a backup having
-# happened, because with --skip-if-unchanged the quiet months are the healthy
-# ones and a heartbeat that goes silent when all is well inverts the signal.
+# happened, because the quiet nights are the healthy ones and a heartbeat that
+# goes silent when all is well inverts the signal.
 if [ "$DRY_RUN" = 0 ]; then
 	HB_AGE=$((HEARTBEAT_DAYS * 86400 + 1))
 	if [ -f "$HEARTBEAT" ]; then
